@@ -170,4 +170,83 @@ public sealed class DockManagerTests
                 Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [TestFact]
+    public void ReorderPinnedItem_UpdatesOrderFiresEventAndPersistsToDisk()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "DeskGridTests_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var cfgSvc = new ConfigService(tempDir);
+            var cfg = new AppConfig();
+            cfg.Dock.PinnedItems.AddRange(
+            [
+                new DockPinnedItem { Id = "p1", DisplayName = "Explorer", TargetPath = @"C:\Windows\explorer.exe", AppKey = "explorer" },
+                new DockPinnedItem { Id = "p2", DisplayName = "Edge", TargetPath = @"C:\Apps\msedge.exe", AppKey = "msedge" },
+                new DockPinnedItem { Id = "p3", DisplayName = "Notepad", TargetPath = @"C:\Windows\notepad.exe", AppKey = "notepad" },
+                new DockPinnedItem { Id = "p4", DisplayName = "Terminal", TargetPath = @"C:\Apps\wt.exe", AppKey = "wt" }
+            ]);
+
+            var mgr = new DockManager(cfg, cfgSvc);
+            var eventCount = 0;
+            mgr.DockChanged += (_, _) => eventCount++;
+
+            // Out-of-range and no-op calls should return false and not notify
+            AssertEx.False(mgr.ReorderPinnedItem(-1, 2));
+            AssertEx.False(mgr.ReorderPinnedItem(0, 99));
+            AssertEx.False(mgr.ReorderPinnedItem(1, 1));
+            AssertEx.Equal(0, eventCount);
+
+            // Drag p1 (0) -> index 2 => [p2, p3, p1, p4]
+            AssertEx.True(mgr.ReorderPinnedItem(0, 2));
+            AssertEx.Equal("p2,p3,p1,p4", string.Join(",", cfg.Dock.PinnedItems.Select(p => p.Id)));
+            AssertEx.Equal(1, eventCount);
+
+            // Drag p4 (3) -> index 0 => [p4, p2, p3, p1]
+            AssertEx.True(mgr.ReorderPinnedItem(3, 0));
+            AssertEx.Equal("p4,p2,p3,p1", string.Join(",", cfg.Dock.PinnedItems.Select(p => p.Id)));
+            AssertEx.Equal(2, eventCount);
+
+            // Reload from disk to verify immediate persistence via ConfigService
+            var reloaded = cfgSvc.LoadOrCreate(() => new AppConfig());
+            AssertEx.Equal("p4,p2,p3,p1", string.Join(",", reloaded.Dock.PinnedItems.Select(p => p.Id)));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+                Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [TestFact]
+    public void DragReorderCalculator_HorizontalSlotAndTargetIndexResolution()
+    {
+        var bounds = new HorizontalSlotBound[]
+        {
+            new(4, 56),   // [4..60], center 32
+            new(68, 56),  // [68..124], center 96
+            new(132, 56), // [132..188], center 160
+            new(196, 56)  // [196..252], center 224
+        };
+
+        var beforeFirst = DragReorderCalculator.ComputeHorizontalDropTarget(10, bounds);
+        AssertEx.Equal(0, beforeFirst.InsertionSlot);
+        AssertEx.Near(2.0, beforeFirst.IndicatorX);
+
+        var between1And2 = DragReorderCalculator.ComputeHorizontalDropTarget(128, bounds);
+        AssertEx.Equal(2, between1And2.InsertionSlot);
+        AssertEx.Near(128.0, between1And2.IndicatorX);
+
+        var afterLast = DragReorderCalculator.ComputeHorizontalDropTarget(240, bounds);
+        AssertEx.Equal(4, afterLast.InsertionSlot);
+        AssertEx.Near(254.0, afterLast.IndicatorX);
+
+        // Target index conversions
+        AssertEx.Equal(0, DragReorderCalculator.ResolveTargetIndex(0, 0, 4)); // before self -> no-op
+        AssertEx.Equal(0, DragReorderCalculator.ResolveTargetIndex(0, 1, 4)); // after self -> no-op
+        AssertEx.Equal(1, DragReorderCalculator.ResolveTargetIndex(0, 2, 4)); // drag right past 1
+        AssertEx.Equal(3, DragReorderCalculator.ResolveTargetIndex(0, 4, 4)); // drag to tail
+        AssertEx.Equal(0, DragReorderCalculator.ResolveTargetIndex(3, 0, 4)); // drag left to head
+        AssertEx.Equal(1, DragReorderCalculator.ResolveTargetIndex(3, 1, 4)); // drag left before 1
+    }
 }

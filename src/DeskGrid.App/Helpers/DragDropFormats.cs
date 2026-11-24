@@ -14,7 +14,8 @@ public sealed record InternalDragPayload(
     string? SourceBoxId,
     string ItemId,
     string TargetPath,
-    string DisplayName);
+    string DisplayName,
+    bool IsPinned = false);
 
 public static class DragDropFormats
 {

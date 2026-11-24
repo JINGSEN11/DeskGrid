@@ -209,6 +209,7 @@ public sealed class ConfigService
             box.Height = Math.Max(140, box.Height);
             box.Opacity = Math.Clamp(box.Opacity, 0.15, 0.90);
             box.VirtualItems ??= [];
+            box.CustomItemOrder ??= [];
         }
 
         return config;

@@ -223,18 +223,25 @@ public sealed class DockManager
         return removed;
     }
 
-    public bool MovePinnedItem(int fromIndex, int toIndex)
+    public bool ReorderPinnedItem(int oldIndex, int newIndex)
     {
-        var list = _config.Dock.PinnedItems;
-        if (fromIndex < 0 || fromIndex >= list.Count || toIndex < 0 || toIndex >= list.Count || fromIndex == toIndex)
-            return false;
+        lock (_orderLock)
+        {
+            var list = _config.Dock.PinnedItems;
+            if (oldIndex < 0 || oldIndex >= list.Count || newIndex < 0 || newIndex >= list.Count || oldIndex == newIndex)
+                return false;
 
-        var item = list[fromIndex];
-        list.RemoveAt(fromIndex);
-        list.Insert(toIndex, item);
+            var item = list[oldIndex];
+            list.RemoveAt(oldIndex);
+            list.Insert(newIndex, item);
+        }
+
         SaveAndNotify();
         return true;
     }
+
+    public bool MovePinnedItem(int fromIndex, int toIndex) =>
+        ReorderPinnedItem(fromIndex, toIndex);
 
     private void SaveAndNotify()
     {

@@ -16,11 +16,17 @@ namespace DeskGrid.App.Controls;
 /// </summary>
 public sealed class DockMagnifyingPanel : StackPanel
 {
+    private const double DragPartShiftPixels = 6.0;
+
     private double[] _currentScales = [];
     private double[] _targetScales = [];
+    private double[] _currentOffsetX = [];
+    private double[] _targetOffsetX = [];
     private double? _mouseX;
     private bool _isHoverActive;
     private bool _isAnimating;
+    private bool _isDragReordering;
+    private int? _dragInsertionSlot;
 
     public bool EnableMagnification { get; set; } = true;
     public double MaxScale { get; set; } = 1.42;
@@ -46,15 +52,19 @@ public sealed class DockMagnifyingPanel : StackPanel
     }
 
     /// <summary>
-    /// Immediately resets all scales to 1.0 without animation (e.g. when hidden or disabled).
+    /// Immediately resets all scales and horizontal drag offsets to rest without animation.
     /// </summary>
     public void ResetScales()
     {
         _isHoverActive = false;
+        _isDragReordering = false;
+        _dragInsertionSlot = null;
         _mouseX = null;
         var count = Children.Count;
         _currentScales = new double[count];
         _targetScales = new double[count];
+        _currentOffsetX = new double[count];
+        _targetOffsetX = new double[count];
         Array.Fill(_currentScales, 1.0);
         Array.Fill(_targetScales, 1.0);
         ApplyTransforms();
@@ -70,14 +80,98 @@ public sealed class DockMagnifyingPanel : StackPanel
         _mouseX = null;
         SyncCurrentScalesFromVisuals();
         Array.Fill(_targetScales, 1.0);
+        if (!_isDragReordering)
+            Array.Fill(_targetOffsetX, 0.0);
 
-        if (AnyScaleNotSettled())
+        if (AnyTransformNotSettled())
             StartAnimation();
         else
         {
             ApplyTransforms();
             StopAnimation();
         }
+    }
+
+    /// <summary>
+    /// Enters drag-reordering mode: smoothly settles magnification to 1.0 and prepares icons for parting shifts.
+    /// </summary>
+    public void BeginDragReorder()
+    {
+        _isDragReordering = true;
+        _dragInsertionSlot = null;
+        _isHoverActive = false;
+        _mouseX = null;
+        SyncCurrentScalesFromVisuals();
+        Array.Fill(_targetScales, 1.0);
+        Array.Fill(_targetOffsetX, 0.0);
+
+        if (AnyTransformNotSettled())
+            StartAnimation();
+        else
+            ApplyTransforms();
+    }
+
+    /// <summary>
+    /// Updates the target insertion gap during drag-reordering so adjacent icons smoothly glide apart.
+    /// Pass null when no valid reorder gap is targeted.
+    /// </summary>
+    public void SetDragInsertionSlot(int? insertionSlot)
+    {
+        if (!_isDragReordering)
+            return;
+
+        EnsureArrays();
+        if (_dragInsertionSlot == insertionSlot && _targetOffsetX.Length == Children.Count)
+            return;
+
+        _dragInsertionSlot = insertionSlot;
+        RecomputeDragOffsets();
+
+        if (AnyTransformNotSettled())
+            StartAnimation();
+        else
+            ApplyTransforms();
+    }
+
+    /// <summary>
+    /// Exits drag-reordering mode and returns all icon horizontal offsets back to zero.
+    /// </summary>
+    public void EndDragReorder(bool snapOffsets = false)
+    {
+        _isDragReordering = false;
+        _dragInsertionSlot = null;
+        SyncCurrentScalesFromVisuals();
+        Array.Fill(_targetScales, 1.0);
+        Array.Fill(_targetOffsetX, 0.0);
+
+        if (snapOffsets)
+            Array.Fill(_currentOffsetX, 0.0);
+
+        if (AnyTransformNotSettled())
+            StartAnimation();
+        else
+        {
+            ApplyTransforms();
+            StopAnimation();
+        }
+    }
+
+    /// <summary>
+    /// Returns pure layout bounds (unaffected by RenderTransform) for every child slot.
+    /// </summary>
+    public IReadOnlyList<HorizontalSlotBound> GetLayoutSlotBounds()
+    {
+        var count = Children.Count;
+        var bounds = new List<HorizontalSlotBound>(count);
+        for (var i = 0; i < count; i++)
+        {
+            if (Children[i] is FrameworkElement fe)
+            {
+                var offset = VisualTreeHelper.GetOffset(fe);
+                bounds.Add(new HorizontalSlotBound(offset.X, fe.ActualWidth));
+            }
+        }
+        return bounds;
     }
 
     protected override void OnVisualChildrenChanged(DependencyObject visualAdded, DependencyObject visualRemoved)
@@ -90,8 +184,12 @@ public sealed class DockMagnifyingPanel : StackPanel
         _mouseX = null;
         SyncCurrentScalesFromVisuals();
         Array.Fill(_targetScales, 1.0);
+        if (_isDragReordering)
+            RecomputeDragOffsets();
+        else
+            Array.Fill(_targetOffsetX, 0.0);
 
-        if (AnyScaleNotSettled())
+        if (AnyTransformNotSettled())
             StartAnimation();
         else
             StopAnimation();
@@ -99,6 +197,9 @@ public sealed class DockMagnifyingPanel : StackPanel
 
     private void OnPanelMouseMove(object sender, MouseEventArgs e)
     {
+        if (_isDragReordering)
+            return;
+
         if (!EnableMagnification)
         {
             SmoothResetScales();
@@ -113,6 +214,9 @@ public sealed class DockMagnifyingPanel : StackPanel
 
     private void OnPanelMouseLeave(object sender, MouseEventArgs e)
     {
+        if (_isDragReordering)
+            return;
+
         SmoothResetScales();
     }
 
@@ -121,29 +225,65 @@ public sealed class DockMagnifyingPanel : StackPanel
         var count = Children.Count;
         _currentScales = new double[count];
         _targetScales = new double[count];
+        _currentOffsetX = new double[count];
+        _targetOffsetX = new double[count];
 
         for (var i = 0; i < count; i++)
         {
             var scale = 1.0;
+            var offsetX = 0.0;
             if (Children[i] is FrameworkElement fe &&
                 fe.RenderTransform is TransformGroup group &&
-                group.Children.Count >= 1 &&
-                group.Children[0] is ScaleTransform st &&
-                !double.IsNaN(st.ScaleX) &&
-                !double.IsInfinity(st.ScaleX))
+                group.Children.Count >= 1)
             {
-                scale = Math.Clamp(st.ScaleX, 1.0, 2.0);
+                if (group.Children[0] is ScaleTransform st &&
+                    !double.IsNaN(st.ScaleX) &&
+                    !double.IsInfinity(st.ScaleX))
+                {
+                    scale = Math.Clamp(st.ScaleX, 1.0, 2.0);
+                }
+
+                if (group.Children.Count >= 2 &&
+                    group.Children[1] is TranslateTransform tt &&
+                    !double.IsNaN(tt.X) &&
+                    !double.IsInfinity(tt.X))
+                {
+                    offsetX = Math.Clamp(tt.X, -40.0, 40.0);
+                }
             }
 
             _currentScales[i] = scale;
             _targetScales[i] = 1.0;
+            _currentOffsetX[i] = offsetX;
+            _targetOffsetX[i] = 0.0;
         }
     }
 
     private void EnsureArrays()
     {
-        if (_currentScales.Length != Children.Count)
+        if (_currentScales.Length != Children.Count || _currentOffsetX.Length != Children.Count)
             SyncCurrentScalesFromVisuals();
+    }
+
+    private void RecomputeDragOffsets()
+    {
+        EnsureArrays();
+        var count = Children.Count;
+        Array.Fill(_targetOffsetX, 0.0);
+
+        if (!_isDragReordering || _dragInsertionSlot is null || count == 0)
+            return;
+
+        var slot = Math.Clamp(_dragInsertionSlot.Value, 0, count);
+        for (var i = 0; i < count; i++)
+        {
+            if (slot == 0)
+                _targetOffsetX[i] = DragPartShiftPixels;
+            else if (slot == count)
+                _targetOffsetX[i] = -DragPartShiftPixels;
+            else
+                _targetOffsetX[i] = i < slot ? -DragPartShiftPixels : DragPartShiftPixels;
+        }
     }
 
     private double? SampleRealTimeMouseX()
@@ -213,11 +353,16 @@ public sealed class DockMagnifyingPanel : StackPanel
             EffectRadius);
     }
 
-    private bool AnyScaleNotSettled()
+    private bool AnyTransformNotSettled()
     {
         for (var i = 0; i < _currentScales.Length && i < _targetScales.Length; i++)
         {
             if (Math.Abs(_targetScales[i] - _currentScales[i]) > 0.002)
+                return true;
+        }
+        for (var i = 0; i < _currentOffsetX.Length && i < _targetOffsetX.Length; i++)
+        {
+            if (Math.Abs(_targetOffsetX[i] - _currentOffsetX[i]) > 0.08)
                 return true;
         }
         return false;
@@ -242,7 +387,7 @@ public sealed class DockMagnifyingPanel : StackPanel
         EnsureArrays();
 
         // Strictly re-verify real-time mouse position every frame so missed MouseLeave events never cause sticky magnification
-        if (_isHoverActive)
+        if (!_isDragReordering && _isHoverActive)
         {
             var liveX = SampleRealTimeMouseX();
             if (liveX is null)
@@ -259,6 +404,7 @@ public sealed class DockMagnifyingPanel : StackPanel
         }
         else
         {
+            _isHoverActive = false;
             _mouseX = null;
             Array.Fill(_targetScales, 1.0);
         }
@@ -280,6 +426,20 @@ public sealed class DockMagnifyingPanel : StackPanel
             }
         }
 
+        for (var i = 0; i < _currentOffsetX.Length && i < _targetOffsetX.Length; i++)
+        {
+            var diffX = _targetOffsetX[i] - _currentOffsetX[i];
+            if (Math.Abs(diffX) > 0.08)
+            {
+                _currentOffsetX[i] += diffX * 0.28;
+                settled = false;
+            }
+            else
+            {
+                _currentOffsetX[i] = _targetOffsetX[i];
+            }
+        }
+
         ApplyTransforms();
 
         if (settled && !_isHoverActive)
@@ -294,6 +454,7 @@ public sealed class DockMagnifyingPanel : StackPanel
                 continue;
 
             var s = _currentScales[i];
+            var offsetX = i < _currentOffsetX.Length ? _currentOffsetX[i] : 0.0;
             fe.RenderTransformOrigin = new Point(0.5, 1.0);
 
             if (fe.RenderTransform is not TransformGroup group || group.Children.Count != 2)
@@ -308,6 +469,7 @@ public sealed class DockMagnifyingPanel : StackPanel
             var transTx = (TranslateTransform)group.Children[1];
             scaleTx.ScaleX = s;
             scaleTx.ScaleY = s;
+            transTx.X = Math.Abs(offsetX) <= 0.05 ? 0.0 : offsetX;
             transTx.Y = Math.Abs(s - 1.0) <= 0.001 ? 0.0 : -(s - 1.0) * 14.0;
             Panel.SetZIndex(fe, Math.Abs(s - 1.0) <= 0.001 ? 0 : (int)Math.Round(s * 100));
         }

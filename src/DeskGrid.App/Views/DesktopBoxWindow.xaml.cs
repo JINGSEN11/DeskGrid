@@ -36,7 +36,10 @@ public partial class DesktopBoxWindow : Window
     private BoxItem? _selectedItem;
     private Point _dragStartPoint;
     private BoxItem? _dragCandidate;
+    private Border? _dragCandidateBorder;
     private bool _isDraggingItem;
+    private bool _pendingRefreshAfterDrag;
+    private int _dragSourceItemIndex = -1;
 
     public string BoxId => _box.Id;
     public BoxConfig Config => _box;
@@ -171,6 +174,12 @@ public partial class DesktopBoxWindow : Window
 
     public void RefreshItems()
     {
+        if (_isDraggingItem)
+        {
+            _pendingRefreshAfterDrag = true;
+            return;
+        }
+
         var items = LoadCurrentItems();
         ItemsWrapPanel.Children.Clear();
 
@@ -348,6 +357,8 @@ public partial class DesktopBoxWindow : Window
             SelectItem(item, border);
             if (e.ClickCount == 2)
             {
+                _dragCandidate = null;
+                _dragCandidateBorder = null;
                 OpenBoxItem(item);
                 e.Handled = true;
             }
@@ -355,7 +366,17 @@ public partial class DesktopBoxWindow : Window
             {
                 _dragStartPoint = e.GetPosition(this);
                 _dragCandidate = item;
+                _dragCandidateBorder = border;
                 _isDraggingItem = false;
+            }
+        };
+
+        border.MouseLeftButtonUp += (_, _) =>
+        {
+            if (!_isDraggingItem)
+            {
+                _dragCandidate = null;
+                _dragCandidateBorder = null;
             }
         };
 
@@ -365,20 +386,49 @@ public partial class DesktopBoxWindow : Window
                 return;
 
             var current = e.GetPosition(this);
-            if (Math.Abs(current.X - _dragStartPoint.X) > SystemParameters.MinimumHorizontalDragDistance ||
-                Math.Abs(current.Y - _dragStartPoint.Y) > SystemParameters.MinimumVerticalDragDistance)
+            var thresholdX = Math.Max(5.0, SystemParameters.MinimumHorizontalDragDistance);
+            var thresholdY = Math.Max(5.0, SystemParameters.MinimumVerticalDragDistance);
+            if (Math.Abs(current.X - _dragStartPoint.X) < thresholdX &&
+                Math.Abs(current.Y - _dragStartPoint.Y) < thresholdY)
             {
-                _isDraggingItem = true;
+                return;
+            }
+
+            var candidate = _dragCandidate;
+            var draggedBorder = _dragCandidateBorder;
+            _isDraggingItem = true;
+            _pendingRefreshAfterDrag = false;
+            _dragSourceItemIndex = FindItemTileIndex(candidate.Id);
+
+            if (draggedBorder is not null)
+                draggedBorder.Opacity = 0.38;
+
+            try
+            {
                 var payload = new InternalDragPayload(
                     InternalDragSource.Box,
                     _box.Id,
-                    _dragCandidate.Id,
-                    _dragCandidate.TargetPath,
-                    _dragCandidate.DisplayName);
+                    candidate.Id,
+                    candidate.TargetPath,
+                    candidate.DisplayName);
                 var data = DragDropFormats.CreateDataObject(payload);
                 DragDrop.DoDragDrop(border, data, DragDropEffects.Copy | DragDropEffects.Move | DragDropEffects.Link);
+            }
+            finally
+            {
+                if (draggedBorder is not null)
+                    draggedBorder.Opacity = 1.0;
+
+                HideReorderDropIndicator();
+                var needsRefresh = _pendingRefreshAfterDrag;
                 _dragCandidate = null;
+                _dragCandidateBorder = null;
                 _isDraggingItem = false;
+                _dragSourceItemIndex = -1;
+                _pendingRefreshAfterDrag = false;
+
+                if (needsRefresh)
+                    RefreshItems();
             }
         };
 
@@ -537,9 +587,15 @@ public partial class DesktopBoxWindow : Window
                 try
                 {
                     if (_box.Mode == BoxMode.Virtual)
+                    {
                         _boxManager.RenameVirtualItem(_box.Id, item.Id, newName);
+                    }
                     else
+                    {
                         _shellService.RenameFileSystemEntry(item.TargetPath, newName);
+                        if (string.IsNullOrWhiteSpace(_currentSubfolderPath))
+                            _boxManager.UpdateFolderCustomOrderOnRename(_box.Id, item.TargetPath, newName);
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -768,8 +824,7 @@ public partial class DesktopBoxWindow : Window
         AddCheckItem(sortMenu, "按名称", _box.SortMode == BoxSortMode.NameAsc, () => SetSortMode(BoxSortMode.NameAsc));
         AddCheckItem(sortMenu, "按类型", _box.SortMode == BoxSortMode.TypeAsc, () => SetSortMode(BoxSortMode.TypeAsc));
         AddCheckItem(sortMenu, "按修改时间", _box.SortMode == BoxSortMode.DateModifiedDesc, () => SetSortMode(BoxSortMode.DateModifiedDesc));
-        if (_box.Mode == BoxMode.Virtual)
-            AddCheckItem(sortMenu, "手动顺序", _box.SortMode == BoxSortMode.Manual, () => SetSortMode(BoxSortMode.Manual));
+        AddCheckItem(sortMenu, "手动顺序", _box.SortMode == BoxSortMode.Manual, () => SetSortMode(BoxSortMode.Manual));
         menu.Items.Add(sortMenu);
 
         var opacityMenu = new MenuItem { Header = "玻璃通透度" };
@@ -858,6 +913,88 @@ public partial class DesktopBoxWindow : Window
         ApplyVisualSettings();
     }
 
+    private int FindItemTileIndex(string itemId)
+    {
+        for (var i = 0; i < ItemsWrapPanel.Children.Count; i++)
+        {
+            if (ItemsWrapPanel.Children[i] is Border tile &&
+                tile.Tag is BoxItem bi &&
+                string.Equals(bi.Id, itemId, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private bool TryComputeBoxReorder(
+        DragEventArgs e,
+        string itemId,
+        out int oldIndex,
+        out int newIndex,
+        out GridDropTarget dropTarget)
+    {
+        oldIndex = _dragSourceItemIndex >= 0 ? _dragSourceItemIndex : FindItemTileIndex(itemId);
+        newIndex = oldIndex;
+        dropTarget = default;
+
+        if (oldIndex < 0 || ItemsWrapPanel.Children.Count < 2)
+            return false;
+
+        var ptInBody = e.GetPosition(BodyContainer);
+        if (ptInBody.X < 0 || ptInBody.X > BodyContainer.ActualWidth ||
+            ptInBody.Y < -4 || ptInBody.Y > BodyContainer.ActualHeight + 4)
+        {
+            return false;
+        }
+
+        var bounds = new List<RectBounds>(ItemsWrapPanel.Children.Count);
+        for (var i = 0; i < ItemsWrapPanel.Children.Count; i++)
+        {
+            if (ItemsWrapPanel.Children[i] is FrameworkElement fe)
+            {
+                var offset = VisualTreeHelper.GetOffset(fe);
+                bounds.Add(new RectBounds(offset.X, offset.Y, fe.ActualWidth, fe.ActualHeight));
+            }
+        }
+
+        if (bounds.Count < 2)
+            return false;
+
+        var ptInWrap = e.GetPosition(ItemsWrapPanel);
+        dropTarget = DragReorderCalculator.ComputeWrapGridDropTarget(ptInWrap.X, ptInWrap.Y, bounds);
+        newIndex = DragReorderCalculator.ResolveTargetIndex(oldIndex, dropTarget.InsertionSlot, bounds.Count);
+        return true;
+    }
+
+    private void AutoScrollDuringDrag(DragEventArgs e)
+    {
+        if (ItemsScrollViewer.ScrollableHeight <= 0)
+            return;
+
+        var pt = e.GetPosition(ItemsScrollViewer);
+        const double edgeZone = 24.0;
+        const double step = 10.0;
+
+        if (pt.Y < edgeZone)
+            ItemsScrollViewer.ScrollToVerticalOffset(Math.Max(0, ItemsScrollViewer.VerticalOffset - step));
+        else if (pt.Y > ItemsScrollViewer.ViewportHeight - edgeZone)
+            ItemsScrollViewer.ScrollToVerticalOffset(Math.Min(ItemsScrollViewer.ScrollableHeight, ItemsScrollViewer.VerticalOffset + step));
+    }
+
+    private void ShowReorderDropIndicator(GridDropTarget target)
+    {
+        ReorderDropIndicator.Height = target.IndicatorHeight;
+        Canvas.SetLeft(ReorderDropIndicator, Math.Round(target.IndicatorX - ReorderDropIndicator.Width * 0.5));
+        Canvas.SetTop(ReorderDropIndicator, Math.Round(target.IndicatorY));
+        ReorderDropIndicator.Visibility = Visibility.Visible;
+    }
+
+    private void HideReorderDropIndicator()
+    {
+        ReorderDropIndicator.Visibility = Visibility.Collapsed;
+    }
+
     private void OnBoxDragOver(object sender, DragEventArgs e)
     {
         AnimateHeaderActions(true);
@@ -867,21 +1004,40 @@ public partial class DesktopBoxWindow : Window
             ApplyCollapseVisuals();
         }
 
-        var paths = DragDropFormats.GetDroppedPaths(e.Data);
-        if (paths.Length > 0)
+        var internalPayload = DragDropFormats.TryGetInternalPayload(e.Data);
+        if (internalPayload is { Source: InternalDragSource.Box } &&
+            string.Equals(internalPayload.SourceBoxId, _box.Id, StringComparison.Ordinal))
         {
-            var internalPayload = DragDropFormats.TryGetInternalPayload(e.Data);
-            if (internalPayload is not null && internalPayload.SourceBoxId == _box.Id)
+            DropHighlightBorder.Visibility = Visibility.Collapsed;
+
+            if (string.IsNullOrWhiteSpace(_currentSubfolderPath) &&
+                TryComputeBoxReorder(e, internalPayload.ItemId, out var oldIndex, out var newIndex, out var dropTarget))
             {
-                e.Effects = DragDropEffects.None;
+                AutoScrollDuringDrag(e);
+                e.Effects = DragDropEffects.Move;
+                if (newIndex != oldIndex)
+                    ShowReorderDropIndicator(dropTarget);
+                else
+                    HideReorderDropIndicator();
             }
             else
             {
-                e.Effects = _box.Mode == BoxMode.Virtual
-                    ? DragDropEffects.Link
-                    : (e.KeyStates.HasFlag(DragDropKeyStates.ControlKey) ? DragDropEffects.Copy : DragDropEffects.Move);
-                DropHighlightBorder.Visibility = Visibility.Visible;
+                HideReorderDropIndicator();
+                e.Effects = DragDropEffects.None;
             }
+
+            e.Handled = true;
+            return;
+        }
+
+        HideReorderDropIndicator();
+        var paths = DragDropFormats.GetDroppedPaths(e.Data);
+        if (paths.Length > 0)
+        {
+            e.Effects = _box.Mode == BoxMode.Virtual
+                ? DragDropEffects.Link
+                : (e.KeyStates.HasFlag(DragDropKeyStates.ControlKey) ? DragDropEffects.Copy : DragDropEffects.Move);
+            DropHighlightBorder.Visibility = Visibility.Visible;
         }
         else
         {
@@ -894,14 +1050,29 @@ public partial class DesktopBoxWindow : Window
     private void OnBoxDragLeave(object sender, DragEventArgs e)
     {
         DropHighlightBorder.Visibility = Visibility.Collapsed;
+        HideReorderDropIndicator();
     }
 
     private void OnBoxDrop(object sender, DragEventArgs e)
     {
         DropHighlightBorder.Visibility = Visibility.Collapsed;
+        HideReorderDropIndicator();
+
         var internalPayload = DragDropFormats.TryGetInternalPayload(e.Data);
-        if (internalPayload is not null && internalPayload.SourceBoxId == _box.Id)
+        if (internalPayload is { Source: InternalDragSource.Box } &&
+            string.Equals(internalPayload.SourceBoxId, _box.Id, StringComparison.Ordinal))
+        {
+            if (string.IsNullOrWhiteSpace(_currentSubfolderPath) &&
+                TryComputeBoxReorder(e, internalPayload.ItemId, out var oldIndex, out var newIndex, out _) &&
+                newIndex != oldIndex)
+            {
+                _pendingRefreshAfterDrag = true;
+                _boxManager.ReorderItem(_box.Id, oldIndex, newIndex);
+            }
+
+            e.Handled = true;
             return;
+        }
 
         var paths = DragDropFormats.GetDroppedPaths(e.Data);
         if (paths.Length == 0) return;

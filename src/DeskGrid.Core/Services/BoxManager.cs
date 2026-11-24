@@ -82,7 +82,110 @@ public sealed class BoxManager : IDisposable
             ? ReadFolderPortalItems(box)
             : ReadVirtualItems(box);
 
-        return SortItems(items, box.SortMode);
+        return SortItems(
+            items,
+            box.SortMode,
+            box.Mode == BoxMode.FolderPortal ? box.CustomItemOrder : null);
+    }
+
+    public bool ReorderItem(string boxId, int oldIndex, int newIndex)
+    {
+        var box = GetBox(boxId);
+        if (box is null)
+            return false;
+
+        var currentItems = GetItems(boxId);
+        if (oldIndex < 0 || oldIndex >= currentItems.Count ||
+            newIndex < 0 || newIndex >= currentItems.Count ||
+            oldIndex == newIndex)
+        {
+            return false;
+        }
+
+        if (box.Mode == BoxMode.Virtual)
+        {
+            var byId = new Dictionary<string, VirtualBoxItemConfig>(box.VirtualItems.Count, StringComparer.Ordinal);
+            foreach (var v in box.VirtualItems)
+                byId.TryAdd(v.Id, v);
+
+            var ordered = new List<VirtualBoxItemConfig>(box.VirtualItems.Count);
+            var addedIds = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var item in currentItems)
+            {
+                if (byId.TryGetValue(item.Id, out var cfg) && addedIds.Add(cfg.Id))
+                    ordered.Add(cfg);
+            }
+
+            foreach (var v in box.VirtualItems)
+            {
+                if (addedIds.Add(v.Id))
+                    ordered.Add(v);
+            }
+
+            if (oldIndex >= ordered.Count || newIndex >= ordered.Count)
+                return false;
+
+            var moved = ordered[oldIndex];
+            ordered.RemoveAt(oldIndex);
+            ordered.Insert(newIndex, moved);
+
+            box.VirtualItems = ordered;
+            box.SortMode = BoxSortMode.Manual;
+            SaveAndNotify();
+            BoxItemsChanged?.Invoke(this, boxId);
+            return true;
+        }
+
+        // FolderPortal mode: record filename order in CustomItemOrder without modifying real files on disk
+        var orderedNames = new List<string>(currentItems.Count);
+        foreach (var item in currentItems)
+        {
+            var key = GetFileNameKey(item.TargetPath);
+            if (!string.IsNullOrWhiteSpace(key))
+                orderedNames.Add(key);
+        }
+
+        if (oldIndex >= orderedNames.Count || newIndex >= orderedNames.Count)
+            return false;
+
+        var movedName = orderedNames[oldIndex];
+        orderedNames.RemoveAt(oldIndex);
+        orderedNames.Insert(newIndex, movedName);
+
+        box.CustomItemOrder = orderedNames;
+        box.SortMode = BoxSortMode.Manual;
+        SaveAndNotify();
+        BoxItemsChanged?.Invoke(this, boxId);
+        return true;
+    }
+
+    public void UpdateFolderCustomOrderOnRename(string boxId, string oldTargetPath, string newFileName)
+    {
+        var box = GetBox(boxId);
+        if (box is null || box.Mode != BoxMode.FolderPortal || box.CustomItemOrder.Count == 0)
+            return;
+
+        var oldName = GetFileNameKey(oldTargetPath);
+        if (string.IsNullOrWhiteSpace(oldName) || string.IsNullOrWhiteSpace(newFileName))
+            return;
+
+        var idx = box.CustomItemOrder.FindIndex(n => string.Equals(n, oldName, StringComparison.OrdinalIgnoreCase));
+        if (idx >= 0)
+        {
+            box.CustomItemOrder[idx] = newFileName.Trim();
+            SaveAndNotify();
+        }
+    }
+
+    public static string GetFileNameKey(string targetPath)
+    {
+        if (string.IsNullOrWhiteSpace(targetPath))
+            return string.Empty;
+
+        var trimmed = targetPath.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var fileName = Path.GetFileName(trimmed);
+        return string.IsNullOrWhiteSpace(fileName) ? trimmed : fileName;
     }
 
     public bool AddVirtualItem(string boxId, string targetPath, string? displayName = null)
@@ -279,10 +382,36 @@ public sealed class BoxManager : IDisposable
         return result;
     }
 
-    public static IReadOnlyList<BoxItem> SortItems(IReadOnlyList<BoxItem> items, BoxSortMode sortMode)
+    public static IReadOnlyList<BoxItem> SortItems(
+        IReadOnlyList<BoxItem> items,
+        BoxSortMode sortMode,
+        IReadOnlyList<string>? customItemOrder = null)
     {
         if (sortMode == BoxSortMode.Manual)
+        {
+            if (customItemOrder is { Count: > 0 })
+            {
+                var orderIndex = new Dictionary<string, int>(customItemOrder.Count, StringComparer.OrdinalIgnoreCase);
+                for (var i = 0; i < customItemOrder.Count; i++)
+                {
+                    var key = customItemOrder[i];
+                    if (!string.IsNullOrWhiteSpace(key))
+                        orderIndex.TryAdd(key, i);
+                }
+
+                return items
+                    .OrderBy(i =>
+                    {
+                        var key = GetFileNameKey(i.TargetPath);
+                        return orderIndex.TryGetValue(key, out var idx) ? idx : int.MaxValue;
+                    })
+                    .ThenBy(i => i.Kind == BoxItemKind.Folder ? 0 : 1)
+                    .ThenBy(i => i.DisplayName, StringComparer.CurrentCultureIgnoreCase)
+                    .ToList();
+            }
+
             return items;
+        }
 
         return sortMode switch
         {

@@ -26,7 +26,11 @@ public partial class DockWindow : Window
     private WindowListPopup? _activePopup;
     private Point _dragStartPoint;
     private DockSlotItem? _dragCandidate;
+    private Border? _dragCandidateTile;
     private bool _isDragging;
+    private bool _pendingRefreshAfterDrag;
+    private int _dragSourcePinnedIndex = -1;
+    private bool _reorderCommittedDuringDrag;
 
     public DockWindow(
         AppConfig appConfig,
@@ -111,6 +115,12 @@ public partial class DockWindow : Window
 
     public void RefreshDock(bool forceIconReload = false)
     {
+        if (_isDragging)
+        {
+            _pendingRefreshAfterDrag = true;
+            return;
+        }
+
         var running = _windowTracker.GetRunningWindows();
         var snapshot = _dockManager.BuildSnapshot(running);
         var iconSize = _appConfig.Dock.BaseIconSize;
@@ -291,6 +301,7 @@ public partial class DockWindow : Window
         {
             _dragStartPoint = e.GetPosition(this);
             _dragCandidate = tile.Tag as DockSlotItem;
+            _dragCandidateTile = tile;
             _isDragging = false;
         };
 
@@ -300,29 +311,78 @@ public partial class DockWindow : Window
                 return;
 
             var pt = e.GetPosition(this);
-            if (Math.Abs(pt.X - _dragStartPoint.X) > SystemParameters.MinimumHorizontalDragDistance ||
-                Math.Abs(pt.Y - _dragStartPoint.Y) > SystemParameters.MinimumVerticalDragDistance)
+            var thresholdX = Math.Max(5.0, SystemParameters.MinimumHorizontalDragDistance);
+            var thresholdY = Math.Max(5.0, SystemParameters.MinimumVerticalDragDistance);
+            if (Math.Abs(pt.X - _dragStartPoint.X) < thresholdX &&
+                Math.Abs(pt.Y - _dragStartPoint.Y) < thresholdY)
             {
-                if (!string.IsNullOrWhiteSpace(_dragCandidate.TargetPath))
-                {
-                    _isDragging = true;
-                    var payload = new InternalDragPayload(
-                        InternalDragSource.Dock,
-                        null,
-                        _dragCandidate.Id,
-                        _dragCandidate.TargetPath,
-                        _dragCandidate.DisplayName);
-                    var data = DragDropFormats.CreateDataObject(payload);
-                    DragDrop.DoDragDrop(tile, data, DragDropEffects.Copy | DragDropEffects.Link);
-                }
+                return;
+            }
+
+            var candidate = _dragCandidate;
+            var draggedTile = _dragCandidateTile;
+            if (!candidate.IsPinned && string.IsNullOrWhiteSpace(candidate.TargetPath))
+            {
                 _dragCandidate = null;
+                _dragCandidateTile = null;
+                return;
+            }
+
+            _isDragging = true;
+            _pendingRefreshAfterDrag = false;
+            _reorderCommittedDuringDrag = false;
+            _dragSourcePinnedIndex = candidate.IsPinned ? FindPinnedTileIndex(candidate.Id) : -1;
+
+            if (_dragSourcePinnedIndex >= 0)
+            {
+                PinnedPanel.BeginDragReorder();
+                if (draggedTile is not null)
+                    draggedTile.Opacity = 0.38;
+            }
+
+            try
+            {
+                var payload = new InternalDragPayload(
+                    InternalDragSource.Dock,
+                    null,
+                    candidate.Id,
+                    candidate.TargetPath,
+                    candidate.DisplayName,
+                    IsPinned: candidate.IsPinned);
+                var data = DragDropFormats.CreateDataObject(payload);
+                var allowedEffects = candidate.IsPinned
+                    ? DragDropEffects.Move | DragDropEffects.Copy | DragDropEffects.Link
+                    : DragDropEffects.Copy | DragDropEffects.Link;
+                DragDrop.DoDragDrop(tile, data, allowedEffects);
+            }
+            finally
+            {
+                if (draggedTile is not null)
+                    draggedTile.Opacity = 1.0;
+
+                HidePinnedDropIndicator();
+                if (_dragSourcePinnedIndex >= 0)
+                    PinnedPanel.EndDragReorder(snapOffsets: _reorderCommittedDuringDrag);
+
+                var needsRefresh = _pendingRefreshAfterDrag;
+                _dragCandidate = null;
+                _dragCandidateTile = null;
                 _isDragging = false;
+                _dragSourcePinnedIndex = -1;
+                _reorderCommittedDuringDrag = false;
+                _pendingRefreshAfterDrag = false;
+
+                if (needsRefresh)
+                    RefreshDock();
             }
         };
 
         tile.MouseLeftButtonUp += (_, _) =>
         {
-            if (_isDragging) return;
+            var hadCandidate = _dragCandidate is not null;
+            _dragCandidate = null;
+            _dragCandidateTile = null;
+            if (_isDragging || !hadCandidate) return;
             if (tile.Tag is DockSlotItem current)
                 HandleSlotClick(current, tile);
         };
@@ -536,16 +596,97 @@ public partial class DockWindow : Window
     private void OnNewBox(object sender, RoutedEventArgs e) => _onCreateBox();
     private void OnOpenSettings(object sender, RoutedEventArgs e) => _onOpenSettings();
 
+    private int FindPinnedTileIndex(string itemId)
+    {
+        for (var i = 0; i < PinnedPanel.Children.Count; i++)
+        {
+            if (PinnedPanel.Children[i] is Border b &&
+                b.Tag is DockSlotItem slot &&
+                string.Equals(slot.Id, itemId, StringComparison.Ordinal))
+            {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    private bool TryComputePinnedReorder(DragEventArgs e, string itemId, out int oldIndex, out int newIndex, out HorizontalDropTarget dropTarget)
+    {
+        oldIndex = _dragSourcePinnedIndex >= 0 ? _dragSourcePinnedIndex : FindPinnedTileIndex(itemId);
+        newIndex = oldIndex;
+        dropTarget = default;
+
+        if (oldIndex < 0 || PinnedPanel.Children.Count == 0)
+            return false;
+
+        var ptInPinned = e.GetPosition(PinnedPanel);
+        // Restrict strictly to the center PinnedPanel zone; exclude QuickToolsPanel (left) and RunningPanel (right)
+        var inPinnedZone = ptInPinned.X >= -6.0 &&
+                           ptInPinned.X <= PinnedPanel.ActualWidth + 6.0 &&
+                           ptInPinned.Y >= -28.0 &&
+                           ptInPinned.Y <= PinnedPanel.ActualHeight + 16.0;
+        if (!inPinnedZone)
+            return false;
+
+        var bounds = PinnedPanel.GetLayoutSlotBounds();
+        if (bounds.Count == 0)
+            return false;
+
+        dropTarget = DragReorderCalculator.ComputeHorizontalDropTarget(ptInPinned.X, bounds);
+        newIndex = DragReorderCalculator.ResolveTargetIndex(oldIndex, dropTarget.InsertionSlot, bounds.Count);
+        return true;
+    }
+
+    private void ShowPinnedDropIndicator(double indicatorX)
+    {
+        var indicatorHeight = Math.Max(28.0, Math.Min(PinnedPanel.ActualHeight - 8.0, _appConfig.Dock.BaseIconSize * 0.88));
+        PinnedDropIndicator.Height = indicatorHeight;
+        var top = Math.Max(0.0, (PinnedPanel.ActualHeight - indicatorHeight) * 0.5 - 2.0);
+        Canvas.SetLeft(PinnedDropIndicator, Math.Round(indicatorX - PinnedDropIndicator.Width * 0.5));
+        Canvas.SetTop(PinnedDropIndicator, Math.Round(top));
+        PinnedDropIndicator.Visibility = Visibility.Visible;
+    }
+
+    private void HidePinnedDropIndicator()
+    {
+        PinnedDropIndicator.Visibility = Visibility.Collapsed;
+    }
+
     private void OnDockDragOver(object sender, DragEventArgs e)
     {
         var internalPayload = DragDropFormats.TryGetInternalPayload(e.Data);
         if (internalPayload?.Source == InternalDragSource.Dock)
         {
-            e.Effects = DragDropEffects.None;
+            DockPill.SetResourceReference(Border.BorderBrushProperty, "DgGlassBorderBrush");
+
+            if (internalPayload.IsPinned &&
+                TryComputePinnedReorder(e, internalPayload.ItemId, out var oldIndex, out var newIndex, out var dropTarget))
+            {
+                e.Effects = DragDropEffects.Move;
+                if (newIndex != oldIndex)
+                {
+                    PinnedPanel.SetDragInsertionSlot(dropTarget.InsertionSlot);
+                    ShowPinnedDropIndicator(dropTarget.IndicatorX);
+                }
+                else
+                {
+                    PinnedPanel.SetDragInsertionSlot(null);
+                    HidePinnedDropIndicator();
+                }
+            }
+            else
+            {
+                // Explicitly forbid dropping into Quick Tools (left) or Running Windows (right) zones
+                PinnedPanel.SetDragInsertionSlot(null);
+                HidePinnedDropIndicator();
+                e.Effects = DragDropEffects.None;
+            }
+
             e.Handled = true;
             return;
         }
 
+        HidePinnedDropIndicator();
         var paths = DragDropFormats.GetDroppedPaths(e.Data);
         if (paths.Length > 0)
         {
@@ -561,16 +702,35 @@ public partial class DockWindow : Window
 
     private void OnDockDragLeave(object sender, DragEventArgs e)
     {
-        DockPill.SetResourceReference(Border.BorderBrushProperty, "DgBorderBrush");
+        DockPill.SetResourceReference(Border.BorderBrushProperty, "DgGlassBorderBrush");
+        HidePinnedDropIndicator();
+        PinnedPanel.SetDragInsertionSlot(null);
     }
 
     private void OnDockDrop(object sender, DragEventArgs e)
     {
-        DockPill.SetResourceReference(Border.BorderBrushProperty, "DgBorderBrush");
+        DockPill.SetResourceReference(Border.BorderBrushProperty, "DgGlassBorderBrush");
+        HidePinnedDropIndicator();
 
         var internalPayload = DragDropFormats.TryGetInternalPayload(e.Data);
         if (internalPayload?.Source == InternalDragSource.Dock)
+        {
+            if (internalPayload.IsPinned &&
+                TryComputePinnedReorder(e, internalPayload.ItemId, out var oldIndex, out var newIndex, out _) &&
+                newIndex != oldIndex)
+            {
+                _reorderCommittedDuringDrag = true;
+                _pendingRefreshAfterDrag = true;
+                _dockManager.ReorderPinnedItem(oldIndex, newIndex);
+            }
+            else
+            {
+                PinnedPanel.SetDragInsertionSlot(null);
+            }
+
+            e.Handled = true;
             return;
+        }
 
         var paths = DragDropFormats.GetDroppedPaths(e.Data);
         foreach (var path in paths)

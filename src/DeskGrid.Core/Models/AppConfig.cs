@@ -107,6 +107,7 @@ public sealed class BoxConfig
     public double Opacity { get; set; } = 0.35;
     public BoxSortMode SortMode { get; set; } = BoxSortMode.NameAsc;
     public List<VirtualBoxItemConfig> VirtualItems { get; set; } = [];
+    public List<string> CustomItemOrder { get; set; } = [];
 }
 
 public sealed class VirtualBoxItemConfig

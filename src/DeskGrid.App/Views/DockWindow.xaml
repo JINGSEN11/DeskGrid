@@ -91,8 +91,27 @@
                             VerticalAlignment="Center"
                             Background="{DynamicResource DgDividerBrush}"/>
 
-                    <!-- 2. Center: Pinned Apps / Folders -->
-                    <controls:DockMagnifyingPanel x:Name="PinnedPanel"/>
+                    <!-- 2. Center: Pinned Apps / Folders (supports horizontal drag-to-reorder) -->
+                    <Grid x:Name="PinnedAreaHost">
+                        <controls:DockMagnifyingPanel x:Name="PinnedPanel"/>
+                        <Canvas x:Name="PinnedDropIndicatorCanvas"
+                                IsHitTestVisible="False"
+                                ClipToBounds="False">
+                            <Border x:Name="PinnedDropIndicator"
+                                    Width="7"
+                                    Height="40"
+                                    CornerRadius="3.5"
+                                    Background="{DynamicResource DgAccentMutedBrush}"
+                                    Visibility="Collapsed"
+                                    IsHitTestVisible="False">
+                                <Border Width="2.5"
+                                        Margin="0,2,0,2"
+                                        HorizontalAlignment="Center"
+                                        CornerRadius="1.25"
+                                        Background="{DynamicResource DgAccentBrush}"/>
+                            </Border>
+                        </Canvas>
+                    </Grid>
 
                     <!-- Divider between Pinned & Running-Only -->
                     <Border x:Name="RunningDivider"

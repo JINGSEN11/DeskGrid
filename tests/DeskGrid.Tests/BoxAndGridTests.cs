@@ -79,4 +79,139 @@ public sealed class BoxAndGridTests
                 Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [TestFact]
+    public void VirtualBox_ReorderItem_SwitchesToManualAndPersistsOrder()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "DeskGridTests_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(tempDir);
+            var fA = Path.Combine(tempDir, "alpha.txt");
+            var fB = Path.Combine(tempDir, "beta.txt");
+            var fC = Path.Combine(tempDir, "gamma.txt");
+            File.WriteAllText(fA, "a");
+            File.WriteAllText(fB, "b");
+            File.WriteAllText(fC, "c");
+
+            var cfgSvc = new ConfigService(Path.Combine(tempDir, "cfg"));
+            var cfg = new AppConfig();
+            using var mgr = new BoxManager(cfg, cfgSvc);
+
+            var box = mgr.CreateBox("测试虚拟盒", BoxMode.Virtual);
+            mgr.AddVirtualItem(box.Id, fC, "Gamma");
+            mgr.AddVirtualItem(box.Id, fA, "Alpha");
+            mgr.AddVirtualItem(box.Id, fB, "Beta");
+
+            // Start sorted by NameAsc: visual order is [Alpha, Beta, Gamma]
+            box.SortMode = BoxSortMode.NameAsc;
+            mgr.UpdateBox(box);
+            AssertEx.Equal("Alpha,Beta,Gamma", string.Join(",", mgr.GetItems(box.Id).Select(i => i.DisplayName)));
+
+            // Drag visual index 2 (Gamma) to index 0 => [Gamma, Alpha, Beta], SortMode auto-switches to Manual
+            AssertEx.True(mgr.ReorderItem(box.Id, 2, 0));
+            AssertEx.Equal(BoxSortMode.Manual, box.SortMode);
+            AssertEx.Equal("Gamma,Alpha,Beta", string.Join(",", mgr.GetItems(box.Id).Select(i => i.DisplayName)));
+            AssertEx.Equal("Gamma,Alpha,Beta", string.Join(",", box.VirtualItems.Select(i => i.DisplayName)));
+
+            // Reload from disk to verify persistence
+            var reloaded = cfgSvc.LoadOrCreate(() => new AppConfig());
+            using var mgr2 = new BoxManager(reloaded, cfgSvc);
+            AssertEx.Equal(BoxSortMode.Manual, reloaded.Boxes[0].SortMode);
+            AssertEx.Equal("Gamma,Alpha,Beta", string.Join(",", mgr2.GetItems(box.Id).Select(i => i.DisplayName)));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+                Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [TestFact]
+    public void FolderPortalBox_ReorderItem_PersistsCustomItemOrderAndAppendsNewFiles()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "DeskGridTests_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var portalDir = Path.Combine(tempDir, "portal");
+            Directory.CreateDirectory(portalDir);
+            var f1 = Path.Combine(portalDir, "a.txt");
+            var f2 = Path.Combine(portalDir, "b.txt");
+            var f3 = Path.Combine(portalDir, "c.txt");
+            File.WriteAllText(f1, "1");
+            File.WriteAllText(f2, "2");
+            File.WriteAllText(f3, "3");
+
+            var cfgSvc = new ConfigService(Path.Combine(tempDir, "cfg"));
+            var cfg = new AppConfig();
+            using var mgr = new BoxManager(cfg, cfgSvc);
+
+            var box = mgr.CreateBox("目录映射盒", BoxMode.FolderPortal, portalDir);
+            AssertEx.Equal(BoxSortMode.NameAsc, box.SortMode);
+            AssertEx.Equal("a.txt,b.txt,c.txt", string.Join(",", mgr.GetItems(box.Id).Select(i => i.DisplayName)));
+
+            // Drag c.txt (index 2) to index 0 => [c.txt, a.txt, b.txt]
+            AssertEx.True(mgr.ReorderItem(box.Id, 2, 0));
+            AssertEx.Equal(BoxSortMode.Manual, box.SortMode);
+            AssertEx.Equal("c.txt,a.txt,b.txt", string.Join(",", box.CustomItemOrder));
+            AssertEx.Equal("c.txt,a.txt,b.txt", string.Join(",", mgr.GetItems(box.Id).Select(i => i.DisplayName)));
+
+            // Disk files remain untouched
+            AssertEx.True(File.Exists(f1) && File.Exists(f2) && File.Exists(f3));
+
+            // Add a brand new file on disk (even starting with "0" alphabetically): must appear at tail!
+            var fNew = Path.Combine(portalDir, "0-new.txt");
+            File.WriteAllText(fNew, "new");
+            AssertEx.Equal("c.txt,a.txt,b.txt,0-new.txt", string.Join(",", mgr.GetItems(box.Id).Select(i => i.DisplayName)));
+
+            // Rename keeps slot position via UpdateFolderCustomOrderOnRename
+            var f3Renamed = Path.Combine(portalDir, "z-renamed.txt");
+            File.Move(f3, f3Renamed);
+            mgr.UpdateFolderCustomOrderOnRename(box.Id, f3, "z-renamed.txt");
+            AssertEx.Equal("z-renamed.txt,a.txt,b.txt,0-new.txt", string.Join(",", mgr.GetItems(box.Id).Select(i => i.DisplayName)));
+
+            // Reload config from disk to verify persistence
+            var reloaded = cfgSvc.LoadOrCreate(() => new AppConfig());
+            using var mgr2 = new BoxManager(reloaded, cfgSvc);
+            AssertEx.Equal(BoxSortMode.Manual, reloaded.Boxes[0].SortMode);
+            AssertEx.Equal("z-renamed.txt,a.txt,b.txt", string.Join(",", reloaded.Boxes[0].CustomItemOrder));
+            AssertEx.Equal("z-renamed.txt,a.txt,b.txt,0-new.txt", string.Join(",", mgr2.GetItems(box.Id).Select(i => i.DisplayName)));
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+                Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [TestFact]
+    public void DragReorderCalculator_WrapGridMultiRowDropTargets()
+    {
+        // 2 rows: Row 0 has items 0,1,2 (y=2..82); Row 1 has items 3,4 (y=86..166)
+        var rects = new RectBounds[]
+        {
+            new(2, 2, 74, 80),
+            new(80, 2, 74, 80),
+            new(158, 2, 74, 80),
+            new(2, 86, 74, 80),
+            new(80, 86, 74, 80)
+        };
+
+        // End of Row 0 (right half of item 2): slot 3, indicator stays on Row 0 right of item 2
+        var row0End = DragReorderCalculator.ComputeWrapGridDropTarget(220, 40, rects);
+        AssertEx.Equal(3, row0End.InsertionSlot);
+        AssertEx.Near(234, row0End.IndicatorX);
+        AssertEx.Near(6, row0End.IndicatorY);
+
+        // Start of Row 1 (left half of item 3): slot 3, indicator stays on Row 1 left of item 3
+        var row1Start = DragReorderCalculator.ComputeWrapGridDropTarget(10, 120, rects);
+        AssertEx.Equal(3, row1Start.InsertionSlot);
+        AssertEx.Near(0, row1Start.IndicatorX);
+        AssertEx.Near(90, row1Start.IndicatorY);
+
+        // Below last row: snaps to end of last row (slot 5)
+        var belowAll = DragReorderCalculator.ComputeWrapGridDropTarget(15, 210, rects);
+        AssertEx.Equal(5, belowAll.InsertionSlot);
+        AssertEx.Near(156, belowAll.IndicatorX);
+    }
 }

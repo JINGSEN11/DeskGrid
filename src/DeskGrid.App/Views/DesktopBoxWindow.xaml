@@ -138,7 +138,26 @@
                             <ScrollViewer.Resources>
                                 <Style TargetType="ScrollBar" BasedOn="{StaticResource DgThinScrollBar}"/>
                             </ScrollViewer.Resources>
-                            <WrapPanel x:Name="ItemsWrapPanel" Orientation="Horizontal"/>
+                            <Grid>
+                                <WrapPanel x:Name="ItemsWrapPanel" Orientation="Horizontal"/>
+                                <Canvas x:Name="ReorderIndicatorCanvas"
+                                        IsHitTestVisible="False"
+                                        ClipToBounds="False">
+                                    <Border x:Name="ReorderDropIndicator"
+                                            Width="7"
+                                            Height="56"
+                                            CornerRadius="3.5"
+                                            Background="{DynamicResource DgAccentMutedBrush}"
+                                            Visibility="Collapsed"
+                                            IsHitTestVisible="False">
+                                        <Border Width="2.5"
+                                                Margin="0,2,0,2"
+                                                HorizontalAlignment="Center"
+                                                CornerRadius="1.25"
+                                                Background="{DynamicResource DgAccentBrush}"/>
+                                    </Border>
+                                </Canvas>
+                            </Grid>
                         </ScrollViewer>
 
                         <!-- Empty State Hint -->
