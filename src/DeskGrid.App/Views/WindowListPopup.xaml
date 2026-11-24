@@ -1,0 +1,48 @@
+<Window x:Class="DeskGrid.App.Views.WindowListPopup"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        ResizeMode="NoResize"
+        ShowInTaskbar="False"
+        Topmost="True"
+        SizeToContent="WidthAndHeight"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True"
+        TextOptions.TextFormattingMode="Ideal"
+        TextOptions.TextRenderingMode="Grayscale"
+        Deactivated="OnPopupDeactivated">
+    <Window.Resources>
+        <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
+            <Setter Property="TextOptions.TextRenderingMode" Value="Grayscale"/>
+        </Style>
+    </Window.Resources>
+    <Grid Margin="12">
+        <!-- Dedicated sibling shadow layer: never wraps foreground text or controls -->
+        <Border Background="{DynamicResource DgPopupBrush}"
+                CornerRadius="12"
+                IsHitTestVisible="False">
+            <Border.Effect>
+                <DropShadowEffect BlurRadius="18" ShadowDepth="4" Opacity="0.32" Color="Black"/>
+            </Border.Effect>
+        </Border>
+        <Border Background="Transparent"
+                BorderBrush="{DynamicResource DgBorderBrush}"
+                BorderThickness="1"
+                CornerRadius="12"
+                Padding="8"
+                MinWidth="240"
+                MaxWidth="360"
+                SnapsToDevicePixels="True">
+            <StackPanel>
+                <TextBlock x:Name="AppHeaderText"
+                           FontSize="12"
+                           FontWeight="SemiBold"
+                           Foreground="{DynamicResource DgTextSecondaryBrush}"
+                           Margin="8,2,8,6"/>
+                <StackPanel x:Name="WindowsListPanel"/>
+            </StackPanel>
+        </Border>
+    </Grid>
+</Window>

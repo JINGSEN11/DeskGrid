@@ -1,0 +1,98 @@
+<div align="center">
+
+# DeskGrid
+
+**面向 Windows 11（兼顾 Windows 10）的开源轻量桌面整理助手与增强型 Fluent Dock 栏**
+
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%2010-0078D4?logo=windows)](https://www.microsoft.com/windows)
+[![.NET](https://img.shields.io/badge/.NET-10.0%20LTS-512BD4?logo=dotnet)](https://dotnet.microsoft.com/)
+[![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%203rd--Party-success)](#技术特点)
+
+简体中文 | [English](README_EN.md)
+
+</div>
+
+---
+
+## 简介
+
+**DeskGrid** 基于 **.NET 10 (LTS) + WPF（原生 Fluent Theme）+ Win32 / DWM / Shell COM** 构建，运行期**零第三方 UI 框架依赖**。旨在提供原生 Win11 Fluent 毛玻璃质感、低内存常驻、零侵入可逆的桌面分区收纳与 Dock 交互体验。
+
+## 核心特性
+
+### 桌面分区盒子（混合管理模式）
+- **虚拟盒子（Virtual Box）**：存放应用、文件、文件夹或网址的快捷引用，**不挪动磁盘原文件**，移出条目绝不删除源文件。
+- **目录映射盒子（Folder Portal Box）**：直接绑定任意本地文件夹（如 `Desktop`、`Downloads` 或项目目录），基于 `FileSystemWatcher` 实时同步变动，支持进入子目录与返回上级，删除默认移入回收站。
+- **卷起 / 悬停展开**：双击标题栏或点击折叠按钮即可卷起为标题栏；鼠标悬停或拖入文件时自动平滑展开。
+- **桌面友好体验**：原生 Win11 DWM Acrylic/Mica 毛玻璃、深浅色自动跟随系统、位置与尺寸锁定、网格与边缘吸附、`Win+D` 免疫、双击桌面空白处一键显隐所有盒子。
+
+### 增强型 Dock 栏
+- **三段式清晰布局**：`[ 快捷工具区 ] | [ 固定应用 / 文件夹区 ] | [ 当前运行中窗口区 ]`。
+- **内置高频快捷工具**：最左侧提供 **一键显隐系统原生桌面图标**、显隐全部盒子、新建盒子、偏好设置入口。
+- **丝滑交互与多窗口切换**：60fps 零闲置开销波浪悬停放大动效、Fluent 运行指示点、单应用多窗口标题弹窗快速切换、支持盒子 ↔ Dock 双向拖拽。
+- **全屏避让与安全守护**：全屏游戏/视频自动静默隐藏；支持可选隐藏系统原生任务栏，并在正常退出或异常崩溃重启时自动安全恢复任务栏状态。
+
+### 配置管理与便携运行
+- **容灾存储**：配置采用 JSON 原子写入 + 3 份滚动备份自动恢复。
+- **一键迁移**：支持导出/导入 `.deskgrid` 配置文件，以及无 UAC 弹窗的开机自启设置。
+- **便携模式**：在程序同级目录创建空文件 `portable.flag` 即可启用便携模式，配置自动保存至 `./data/config.json`（默认保存于 `%APPDATA%\DeskGrid\config.json`）。
+
+## 环境要求
+
+- **操作系统**：Windows 11 22H2+（推荐，完整 DWM Acrylic/Mica）或 Windows 10 21H2+
+- **开发环境**：[.NET 10 SDK](https://dotnet.microsoft.com/download)（用于从源码编译）
+
+## 快速开始
+
+```powershell
+# 1. 克隆仓库
+git clone https://github.com/JINGSEN11/DeskGrid.git
+cd DeskGrid
+
+# 2. 编译解决方案（Release）
+dotnet build DeskGrid.sln -c Release
+
+# 3. 运行核心层自动化测试
+dotnet run --project tests/DeskGrid.Tests/DeskGrid.Tests.csproj -c Release
+
+# 4. 启动 DeskGrid
+dotnet run --project src/DeskGrid.App/DeskGrid.App.csproj -c Release
+```
+
+### 发布独立绿色版（示例）
+
+```powershell
+# 依赖本机 .NET 10 桌面运行时（体积极小）
+dotnet publish src/DeskGrid.App/DeskGrid.App.csproj -c Release -r win-x64 --self-contained false -o publish/win-x64
+
+# 或打包自包含单文件版本（无需预先安装 .NET 运行时）
+dotnet publish src/DeskGrid.App/DeskGrid.App.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish/win-x64-standalone
+```
+
+## 项目结构
+
+```text
+DeskGrid/
+├── docs/
+│   └── PRD.md                 # 产品需求规格文档
+├── src/
+│   ├── DeskGrid.App/          # WPF 桌面应用层（Fluent 样式、盒子/Dock 窗口、托盘与设置）
+│   ├── DeskGrid.Core/         # 领域模型与核心服务（配置容灾、盒子/Dock 管理、网格吸附与缩放计算）
+│   └── DeskGrid.Win32/        # 原生 Win32 / DWM / Shell COM 互操作层
+├── tests/
+│   └── DeskGrid.Tests/        # 核心层自动化测试
+├── DeskGrid.sln
+└── LICENSE
+```
+
+## 技术特点
+
+- **纯原生技术栈**：仅使用 .NET 10 + WPF 原生 Fluent Theme + Win32/DWM/Shell API，无外部 NuGet 运行时依赖，易于审计与维护。
+- **清晰分层架构**：核心业务逻辑（`DeskGrid.Core`）、系统底层能力（`DeskGrid.Win32`）与界面层（`DeskGrid.App`）完全解耦。
+
+更多产品细节请参考 [docs/PRD.md](docs/PRD.md)。
+
+## 开源协议
+
+本项目基于 [MIT License](LICENSE) 开源，欢迎自由使用、修改与提交 Pull Request。

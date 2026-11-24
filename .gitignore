@@ -1,0 +1,24 @@
+# .NET / Visual Studio / Rider
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+*.cache
+TestResults/
+publish/
+
+# Local CLI / NuGet scratch
+.dotnet-cli/
+.nuget/
+
+# Local portable / runtime files
+portable.flag
+data/
+*.log
+
+# OS files
+Thumbs.db
+Desktop.ini
+.DS_Store
