@@ -10,22 +10,9 @@
 
             <FontFamily x:Key="DgUiFontFamily">Segoe UI Variable Text, Microsoft YaHei UI, SimSun</FontFamily>
 
-            <!-- Global CJK font fallback chain & HiDPI text sharpening (including independent visual trees like ContextMenu/Popup/ToolTip) -->
-            <Style TargetType="ContextMenu">
-                <Setter Property="FontFamily" Value="{StaticResource DgUiFontFamily}"/>
-                <Setter Property="UseLayoutRounding" Value="True"/>
-                <Setter Property="SnapsToDevicePixels" Value="True"/>
-                <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
-                <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
-            </Style>
-
-            <Style TargetType="MenuItem">
-                <Setter Property="FontFamily" Value="{StaticResource DgUiFontFamily}"/>
-                <Setter Property="UseLayoutRounding" Value="True"/>
-                <Setter Property="SnapsToDevicePixels" Value="True"/>
-                <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
-                <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
-            </Style>
+            <!-- Global unified dark frosted rounded ContextMenu & MenuItem templates (Level-1 & all Submenus) -->
+            <Style TargetType="ContextMenu" BasedOn="{StaticResource DgContextMenuStyle}"/>
+            <Style TargetType="MenuItem" BasedOn="{StaticResource DgMenuItemStyle}"/>
 
             <Style TargetType="Popup">
                 <Setter Property="TextElement.FontFamily" Value="{StaticResource DgUiFontFamily}"/>

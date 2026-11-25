@@ -217,21 +217,29 @@ public partial class DockWindow : Window
 
     public void SetFullscreenHidden(bool hidden)
     {
-        if (!_appConfig.Dock.Enabled)
+        if (!_appConfig.ShowDock || !_appConfig.Dock.Enabled)
         {
-            Hide();
+            HideDock();
             return;
         }
 
         if (hidden && _appConfig.Dock.AutoHideOnFullscreen)
         {
-            Hide();
+            HideDock();
         }
         else if (!IsVisible)
         {
             Show();
             RepositionDock();
         }
+    }
+
+    public void HideDock()
+    {
+        try { _activePopup?.Close(); } catch { }
+        _activePopup = null;
+        if (IsVisible)
+            Hide();
     }
 
     private int GetHighDpiDockIconRequestPixels(double iconSize)

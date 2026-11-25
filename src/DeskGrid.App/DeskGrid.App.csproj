@@ -7,6 +7,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <LangVersion>latest</LangVersion>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\app.ico</ApplicationIcon>
     <AssemblyName>DeskGrid</AssemblyName>
     <RootNamespace>DeskGrid.App</RootNamespace>
     <Product>DeskGrid</Product>
@@ -17,6 +18,9 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <NoWarn>$(NoWarn);WPF0001</NoWarn>
   </PropertyGroup>
+  <ItemGroup>
+    <Resource Include="Assets\app.ico" />
+  </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\DeskGrid.Core\DeskGrid.Core.csproj" />
     <ProjectReference Include="..\DeskGrid.Win32\DeskGrid.Win32.csproj" />

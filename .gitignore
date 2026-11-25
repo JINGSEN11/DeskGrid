@@ -8,6 +8,7 @@ obj/
 *.cache
 TestResults/
 publish/
+release/
 
 # Local CLI / NuGet scratch
 .dotnet-cli/

@@ -35,6 +35,13 @@ public partial class SettingsWindow : Window
         _loading = false;
     }
 
+    public void SyncFromConfig()
+    {
+        _loading = true;
+        LoadControlsFromConfig();
+        _loading = false;
+    }
+
     private void LoadControlsFromConfig()
     {
         ThemeCombo.SelectedIndex = _config.Appearance.Theme switch
@@ -51,7 +58,8 @@ public partial class SettingsWindow : Window
         DoubleClickDesktopCheck.IsChecked = _config.Behavior.DoubleClickDesktopToToggleBoxes;
         GridSnapCheck.IsChecked = _config.Behavior.EnableGridSnap;
 
-        DockEnabledCheck.IsChecked = _config.Dock.Enabled;
+        ShowDockCheck.IsChecked = _config.ShowDock;
+        DockOptionsPanel.IsEnabled = _config.ShowDock;
         MagnificationCheck.IsChecked = _config.Dock.EnableMagnification;
         MagScaleSlider.Value = _config.Dock.MagnificationScale;
         MagScaleValueText.Text = $"{_config.Dock.MagnificationScale:0.00}x";
@@ -82,7 +90,9 @@ public partial class SettingsWindow : Window
         _config.Behavior.DoubleClickDesktopToToggleBoxes = DoubleClickDesktopCheck.IsChecked == true;
         _config.Behavior.EnableGridSnap = GridSnapCheck.IsChecked == true;
 
-        _config.Dock.Enabled = DockEnabledCheck.IsChecked == true;
+        _config.ShowDock = ShowDockCheck.IsChecked == true;
+        _config.Dock.Enabled = _config.ShowDock;
+        DockOptionsPanel.IsEnabled = _config.ShowDock;
         _config.Dock.EnableMagnification = MagnificationCheck.IsChecked == true;
         _config.Dock.MagnificationScale = Math.Round(MagScaleSlider.Value, 2);
         MagScaleValueText.Text = $"{_config.Dock.MagnificationScale:0.00}x";
@@ -179,7 +189,7 @@ public partial class SettingsWindow : Window
 
         if (confirm == MessageBoxResult.Yes)
         {
-            var fresh = FirstRunInitializer.CreateDefaultConfig();
+            var fresh = FirstRunInitializer.CreateDefaultConfig(SystemParameters.WorkArea.Width, SystemParameters.WorkArea.Height);
             _configService.Save(fresh);
             _onConfigReplaced(fresh);
             Close();

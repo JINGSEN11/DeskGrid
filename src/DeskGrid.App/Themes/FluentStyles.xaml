@@ -106,4 +106,235 @@
         </Setter>
     </Style>
 
+    <!-- Unified Dark Frosted Glass Menu Palette (Level 1 ContextMenu & All Nested Submenus) -->
+    <SolidColorBrush x:Key="DgMenuSurfaceBrush" Color="#E61E222A"/>
+    <SolidColorBrush x:Key="DgMenuBorderBrush" Color="#29FFFFFF"/>
+    <SolidColorBrush x:Key="DgMenuHoverBrush" Color="#1FFFFFFF"/>
+    <SolidColorBrush x:Key="DgMenuForegroundBrush" Color="#F3F4F6"/>
+    <SolidColorBrush x:Key="DgMenuHighlightForegroundBrush" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="DgMenuDisabledForegroundBrush" Color="#7A8290"/>
+    <SolidColorBrush x:Key="DgMenuSeparatorBrush" Color="#1FFFFFFF"/>
+
+    <!-- Unified Menu Separator -->
+    <Style x:Key="DgMenuSeparatorStyle" TargetType="Separator">
+        <Setter Property="Height" Value="1"/>
+        <Setter Property="Margin" Value="8,5,8,5"/>
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="Separator">
+                    <Border Height="1"
+                            Background="{StaticResource DgMenuSeparatorBrush}"
+                            SnapsToDevicePixels="True"/>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+    <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator" BasedOn="{StaticResource DgMenuSeparatorStyle}"/>
+
+    <!-- Unified MenuItem Style (handles both clickable items and nested Submenu Popups) -->
+    <Style x:Key="DgMenuItemStyle" TargetType="MenuItem">
+        <Setter Property="FontFamily" Value="Segoe UI Variable Text, Microsoft YaHei UI, SimSun"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Foreground" Value="{StaticResource DgMenuForegroundBrush}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="MinHeight" Value="32"/>
+        <Setter Property="Padding" Value="10,6,10,6"/>
+        <Setter Property="UseLayoutRounding" Value="True"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
+        <Setter Property="TextOptions.TextRenderingMode" Value="Grayscale"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="MenuItem">
+                    <Grid SnapsToDevicePixels="True">
+                        <Border x:Name="ItemBorder"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="7"
+                                Margin="0,1,0,1"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <Grid>
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="18"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="16"/>
+                                </Grid.ColumnDefinitions>
+
+                                <!-- Checkmark indicator (crisp vector ✓, bound to light Foreground) -->
+                                <Path x:Name="CheckMark"
+                                      Grid.Column="0"
+                                      Data="M 0,4.2 L 3.3,7.5 L 9.5,0.8"
+                                      Stroke="{TemplateBinding Foreground}"
+                                      StrokeThickness="1.7"
+                                      StrokeStartLineCap="Round"
+                                      StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round"
+                                      HorizontalAlignment="Center"
+                                      VerticalAlignment="Center"
+                                      Visibility="Collapsed"
+                                      SnapsToDevicePixels="False"/>
+
+                                <!-- Header text (explicitly bound to high-contrast light Foreground) -->
+                                <ContentPresenter x:Name="HeaderPresenter"
+                                                  Grid.Column="1"
+                                                  ContentSource="Header"
+                                                  RecognizesAccessKey="True"
+                                                  VerticalAlignment="Center"
+                                                  Margin="6,0,18,0"
+                                                  TextElement.Foreground="{TemplateBinding Foreground}">
+                                    <ContentPresenter.Resources>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=MenuItem}}"/>
+                                            <Setter Property="FontFamily" Value="Segoe UI Variable Text, Microsoft YaHei UI, SimSun"/>
+                                            <Setter Property="TextOptions.TextRenderingMode" Value="Grayscale"/>
+                                        </Style>
+                                    </ContentPresenter.Resources>
+                                </ContentPresenter>
+
+                                <!-- Submenu right chevron arrow (crisp vector >, bound to light Foreground) -->
+                                <Path x:Name="SubmenuArrow"
+                                      Grid.Column="2"
+                                      Data="M 0,0 L 4.5,4.2 L 0,8.4"
+                                      Stroke="{TemplateBinding Foreground}"
+                                      StrokeThickness="1.5"
+                                      StrokeStartLineCap="Round"
+                                      StrokeEndLineCap="Round"
+                                      StrokeLineJoin="Round"
+                                      HorizontalAlignment="Right"
+                                      VerticalAlignment="Center"
+                                      Margin="0,0,2,0"
+                                      Visibility="Collapsed"
+                                      SnapsToDevicePixels="False"/>
+                            </Grid>
+                        </Border>
+
+                        <!-- Nested Submenu Popup: IDENTICAL dark frosted rounded card as Level-1 ContextMenu -->
+                        <Popup x:Name="PART_Popup"
+                               AllowsTransparency="True"
+                               Focusable="False"
+                               IsOpen="{Binding IsSubmenuOpen, RelativeSource={RelativeSource TemplatedParent}}"
+                               Placement="Right"
+                               HorizontalOffset="-8"
+                               VerticalOffset="-14"
+                               PopupAnimation="Fade">
+                            <Grid Margin="10"
+                                  UseLayoutRounding="True"
+                                  SnapsToDevicePixels="True"
+                                  TextElement.Foreground="{StaticResource DgMenuForegroundBrush}">
+                                <Grid.Resources>
+                                    <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator" BasedOn="{StaticResource DgMenuSeparatorStyle}"/>
+                                </Grid.Resources>
+                                <!-- Sibling shadow layer (keeps foreground text razor sharp) -->
+                                <Border Background="{StaticResource DgMenuSurfaceBrush}"
+                                        CornerRadius="12"
+                                        IsHitTestVisible="False">
+                                    <Border.Effect>
+                                        <DropShadowEffect BlurRadius="22"
+                                                          ShadowDepth="6"
+                                                          Direction="270"
+                                                          Opacity="0.42"
+                                                          Color="#000000"/>
+                                    </Border.Effect>
+                                </Border>
+
+                                <Border Background="Transparent"
+                                        BorderBrush="{StaticResource DgMenuBorderBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="12"
+                                        Padding="5"
+                                        MinWidth="156"
+                                        SnapsToDevicePixels="True">
+                                    <ScrollViewer CanContentScroll="True"
+                                                  VerticalScrollBarVisibility="Auto"
+                                                  HorizontalScrollBarVisibility="Disabled">
+                                        <StackPanel IsItemsHost="True"
+                                                    KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                                    </ScrollViewer>
+                                </Border>
+                            </Grid>
+                        </Popup>
+                    </Grid>
+                    <ControlTemplate.Triggers>
+                        <Trigger Property="IsChecked" Value="True">
+                            <Setter TargetName="CheckMark" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <Trigger Property="Role" Value="SubmenuHeader">
+                            <Setter TargetName="SubmenuArrow" Property="Visibility" Value="Visible"/>
+                        </Trigger>
+                        <Trigger Property="IsHighlighted" Value="True">
+                            <Setter TargetName="ItemBorder" Property="Background" Value="{StaticResource DgMenuHoverBrush}"/>
+                            <Setter Property="Foreground" Value="{StaticResource DgMenuHighlightForegroundBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsSubmenuOpen" Value="True">
+                            <Setter TargetName="ItemBorder" Property="Background" Value="{StaticResource DgMenuHoverBrush}"/>
+                            <Setter Property="Foreground" Value="{StaticResource DgMenuHighlightForegroundBrush}"/>
+                        </Trigger>
+                        <Trigger Property="IsEnabled" Value="False">
+                            <Setter Property="Foreground" Value="{StaticResource DgMenuDisabledForegroundBrush}"/>
+                            <Setter TargetName="ItemBorder" Property="Opacity" Value="0.65"/>
+                        </Trigger>
+                    </ControlTemplate.Triggers>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
+    <!-- Unified Level-1 ContextMenu Style (Dark Frosted Rounded Card #E61E222A, CornerRadius=12) -->
+    <Style x:Key="DgContextMenuStyle" TargetType="ContextMenu">
+        <Setter Property="FontFamily" Value="Segoe UI Variable Text, Microsoft YaHei UI, SimSun"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Foreground" Value="{StaticResource DgMenuForegroundBrush}"/>
+        <Setter Property="Background" Value="Transparent"/>
+        <Setter Property="BorderThickness" Value="0"/>
+        <Setter Property="Padding" Value="0"/>
+        <Setter Property="HasDropShadow" Value="False"/>
+        <Setter Property="UseLayoutRounding" Value="True"/>
+        <Setter Property="SnapsToDevicePixels" Value="True"/>
+        <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
+        <Setter Property="TextOptions.TextRenderingMode" Value="Grayscale"/>
+        <Setter Property="Template">
+            <Setter.Value>
+                <ControlTemplate TargetType="ContextMenu">
+                    <Grid Margin="10"
+                          UseLayoutRounding="True"
+                          SnapsToDevicePixels="True"
+                          TextElement.Foreground="{StaticResource DgMenuForegroundBrush}">
+                        <Grid.Resources>
+                            <Style TargetType="MenuItem" BasedOn="{StaticResource DgMenuItemStyle}"/>
+                            <Style x:Key="{x:Static MenuItem.SeparatorStyleKey}" TargetType="Separator" BasedOn="{StaticResource DgMenuSeparatorStyle}"/>
+                        </Grid.Resources>
+                        <!-- Sibling shadow + frosted surface layer (prevents text rasterization blur) -->
+                        <Border Background="{StaticResource DgMenuSurfaceBrush}"
+                                CornerRadius="12"
+                                IsHitTestVisible="False">
+                            <Border.Effect>
+                                <DropShadowEffect BlurRadius="22"
+                                                  ShadowDepth="6"
+                                                  Direction="270"
+                                                  Opacity="0.42"
+                                                  Color="#000000"/>
+                            </Border.Effect>
+                        </Border>
+
+                        <Border Background="Transparent"
+                                BorderBrush="{StaticResource DgMenuBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="5"
+                                MinWidth="172"
+                                SnapsToDevicePixels="True">
+                            <ScrollViewer CanContentScroll="True"
+                                          VerticalScrollBarVisibility="Auto"
+                                          HorizontalScrollBarVisibility="Disabled">
+                                <StackPanel IsItemsHost="True"
+                                            KeyboardNavigation.DirectionalNavigation="Cycle"/>
+                            </ScrollViewer>
+                        </Border>
+                    </Grid>
+                </ControlTemplate>
+            </Setter.Value>
+        </Setter>
+    </Style>
+
 </ResourceDictionary>

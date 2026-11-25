@@ -100,6 +100,11 @@ internal static class NativeMethods
     public const uint NIF_ICON = 0x00000002;
     public const uint NIF_TIP = 0x00000004;
 
+    public const uint IMAGE_ICON = 1;
+    public const uint LR_DEFAULTCOLOR = 0x0000;
+    public const int SM_CXSMICON = 49;
+    public const int SM_CYSMICON = 50;
+
     public delegate bool EnumWindowsProc(nint hWnd, nint lParam);
     public delegate nint LowLevelMouseProc(int nCode, nint wParam, nint lParam);
     public delegate void WinEventDelegate(
@@ -422,6 +427,22 @@ internal static class NativeMethods
 
     [DllImport("user32.dll")]
     public static extern nint LoadIcon(nint hInstance, nint lpIconName);
+
+    [DllImport("user32.dll", SetLastError = true, EntryPoint = "LoadImageW")]
+    public static extern nint LoadImage(nint hInst, nint name, uint type, int cx, int cy, uint fuLoad);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    public static extern nint CreateIconFromResourceEx(
+        byte[] presbits,
+        uint dwResSize,
+        [MarshalAs(UnmanagedType.Bool)] bool fIcon,
+        uint dwVer,
+        int cxDesired,
+        int cyDesired,
+        uint flags);
+
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int nIndex);
 
     [DllImport("gdi32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

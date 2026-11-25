@@ -94,4 +94,63 @@ public sealed class ConfigServiceTests
                 Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [TestFact]
+    public void FirstRunInitializer_HasSafeDefaultsAndFitsScreenBounds()
+    {
+        var cfg1080HiDpi = FirstRunInitializer.CreateDefaultConfig(1280, 680);
+        AssertEx.False(cfg1080HiDpi.Behavior.LaunchAtStartup, "AutoStart must default to false.");
+        AssertEx.False(cfg1080HiDpi.Dock.AutoHideSystemTaskbar, "AutoHideSystemTaskbar must default to false.");
+        AssertEx.Equal(2, cfg1080HiDpi.Boxes.Count);
+
+        foreach (var box in cfg1080HiDpi.Boxes)
+        {
+            AssertEx.True(box.Left >= 0 && box.Left + box.Width <= 1280, $"Box '{box.Title}' exceeds 1280 width.");
+            AssertEx.True(box.Top >= 0 && box.Top + box.Height <= 680 - 96, $"Box '{box.Title}' overlaps Dock/bottom.");
+        }
+
+        foreach (var pinned in cfg1080HiDpi.Dock.PinnedItems)
+        {
+            AssertEx.True(
+                File.Exists(pinned.TargetPath) || Directory.Exists(pinned.TargetPath),
+                $"Default Dock item '{pinned.DisplayName}' must exist on disk: {pinned.TargetPath}");
+        }
+
+        var cfg4k = FirstRunInitializer.CreateDefaultConfig(2560, 1400);
+        AssertEx.True(cfg4k.ShowDock, "ShowDock must default to true.");
+        AssertEx.True(cfg4k.Dock.Enabled, "Dock.Enabled must default to true.");
+        AssertEx.Near(340, cfg4k.Boxes[0].Width);
+        AssertEx.Near(260, cfg4k.Boxes[0].Height);
+        AssertEx.Near(316, cfg4k.Boxes[1].Top);
+    }
+
+    [TestFact]
+    public void ShowDock_DefaultsToTrueAndPersistsAcrossSaveAndLoad()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "DeskGridTests_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var svc = new ConfigService(tempDir);
+            var cfg = svc.LoadOrCreate(() => new AppConfig());
+            AssertEx.True(cfg.ShowDock, "Default ShowDock must be true.");
+            AssertEx.True(cfg.Dock.Enabled, "Default Dock.Enabled must be true.");
+
+            cfg.ShowDock = false;
+            svc.Save(cfg);
+
+            var reloaded = svc.LoadOrCreate(() => new AppConfig());
+            AssertEx.False(reloaded.ShowDock, "Persisted ShowDock=false must reload as false.");
+            AssertEx.False(reloaded.Dock.Enabled, "Dock.Enabled must stay synchronized with ShowDock.");
+
+            // Legacy JSON without showDock field should migrate from dock.enabled
+            File.WriteAllText(svc.ConfigFilePath, """{ "schemaVersion": 2, "dock": { "enabled": false } }""");
+            var legacyLoaded = svc.LoadOrCreate(() => new AppConfig());
+            AssertEx.False(legacyLoaded.ShowDock, "Legacy dock.enabled=false must map to ShowDock=false.");
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+                Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }

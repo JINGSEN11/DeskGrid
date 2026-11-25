@@ -45,6 +45,7 @@ public enum BoxItemKind
 public sealed class AppConfig
 {
     public int SchemaVersion { get; set; } = 2;
+    public bool ShowDock { get; set; } = true;
     public AppearanceSettings Appearance { get; set; } = new();
     public BehaviorSettings Behavior { get; set; } = new();
     public DockConfig Dock { get; set; } = new();

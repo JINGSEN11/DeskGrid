@@ -18,8 +18,18 @@ public static class ThemePalette
             UseLayoutRounding = true,
             SnapsToDevicePixels = true
         };
+
+        if (Application.Current?.TryFindResource("DgContextMenuStyle") is Style menuStyle)
+            menu.Style = menuStyle;
+
+        if (Application.Current?.TryFindResource("DgMenuItemStyle") is Style itemStyle)
+            menu.Resources[typeof(MenuItem)] = itemStyle;
+
+        if (Application.Current?.TryFindResource("DgMenuSeparatorStyle") is Style sepStyle)
+            menu.Resources[MenuItem.SeparatorStyleKey] = sepStyle;
+
         TextOptions.SetTextFormattingMode(menu, TextFormattingMode.Ideal);
-        TextOptions.SetTextRenderingMode(menu, TextRenderingMode.ClearType);
+        TextOptions.SetTextRenderingMode(menu, TextRenderingMode.Grayscale);
         return menu;
     }
     public static bool IsDarkMode(ThemePreference preference)

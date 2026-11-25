@@ -57,7 +57,8 @@ public partial class App : Application
             args.Handled = true;
         };
 
-        _config = _configService.LoadOrCreate(FirstRunInitializer.CreateDefaultConfig);
+        _config = _configService.LoadOrCreate(() =>
+            FirstRunInitializer.CreateDefaultConfig(SystemParameters.WorkArea.Width, SystemParameters.WorkArea.Height));
         ThemePalette.ApplyToApplication(this, _config.Appearance.Theme);
 
         InitializeDomainAndUI();
@@ -83,6 +84,11 @@ public partial class App : Application
 
         _fullscreenMonitor.FullscreenStateChanged += (_, isFs) => Dispatcher.BeginInvoke(() =>
         {
+            if (!_config.ShowDock)
+            {
+                _dockWindow?.HideDock();
+                return;
+            }
             _dockWindow?.SetFullscreenHidden(isFs);
         });
         _fullscreenMonitor.Start();
@@ -109,15 +115,17 @@ public partial class App : Application
             OpenCreateBoxDialog,
             OpenSettingsWindow);
 
-        if (_config.Dock.Enabled)
+        if (_config.ShowDock)
             _dockWindow.Show();
 
         // Spawn System Tray
         _trayController ??= new TrayIconController(
             _nativeIcons,
             () => _config.Behavior.BoxesVisible,
+            () => _config.ShowDock,
             OpenCreateBoxDialog,
             ToggleAllBoxesVisibility,
+            ToggleDockVisibility,
             () =>
             {
                 _nativeIcons.ToggleIcons();
@@ -179,6 +187,15 @@ public partial class App : Application
         _dockWindow?.UpdateQuickToolStates();
     }
 
+    private void ToggleDockVisibility()
+    {
+        _config.ShowDock = !_config.ShowDock;
+        _config.Dock.Enabled = _config.ShowDock;
+        _configService.Save(_config);
+        ApplyAllSettingsLive();
+        _settingsWindow?.SyncFromConfig();
+    }
+
     private void OpenCreateBoxDialog()
     {
         var dlg = new CreateBoxDialog();
@@ -219,7 +236,7 @@ public partial class App : Application
 
         if (_dockWindow is not null)
         {
-            if (_config.Dock.Enabled)
+            if (_config.ShowDock)
             {
                 if (!_dockWindow.IsVisible && !(_fullscreenMonitor.IsFullscreenActive && _config.Dock.AutoHideOnFullscreen))
                     _dockWindow.Show();
@@ -228,7 +245,7 @@ public partial class App : Application
             }
             else
             {
-                _dockWindow.Hide();
+                _dockWindow.HideDock();
             }
         }
 
@@ -248,8 +265,9 @@ public partial class App : Application
             // Ignore registry failure
         }
 
-        _taskbarService.SetTaskbarHidden(_config.Dock.Enabled && _config.Dock.AutoHideSystemTaskbar);
-        _dockWindow?.RepositionDock();
+        _taskbarService.SetTaskbarHidden(_config.ShowDock && _config.Dock.AutoHideSystemTaskbar);
+        if (_config.ShowDock)
+            _dockWindow?.RepositionDock();
     }
 
     private void ReplaceConfigAndReload(AppConfig newConfig)
@@ -291,7 +309,7 @@ public partial class App : Application
             OpenCreateBoxDialog,
             OpenSettingsWindow);
 
-        if (_config.Dock.Enabled)
+        if (_config.ShowDock)
             _dockWindow.Show();
 
         ApplySystemSettings();
@@ -308,6 +326,7 @@ public partial class App : Application
     private void SafeRestoreSystemState()
     {
         try { _taskbarService?.RestoreIfHidden(); } catch { }
+        try { _nativeIcons?.SetIconsVisible(true); } catch { }
     }
 
     private void ShutdownSafely()

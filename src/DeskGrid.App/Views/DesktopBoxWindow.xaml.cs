@@ -89,12 +89,24 @@ public partial class DesktopBoxWindow : Window
             }
         };
 
-        Left = _box.Left - ShadowPadding;
-        Top = _box.Top - ShadowPadding;
-        Width = _box.Width + ShadowPadding * 2;
-        Height = (_box.IsCollapsed ? CollapsedCardHeight : _box.Height) + ShadowPadding * 2;
+        var workArea = SystemParameters.WorkArea;
+        var logicalWidth = Math.Clamp(_box.Width, 220, Math.Max(220, workArea.Width - 24));
+        var logicalHeight = Math.Clamp(_box.Height, 140, Math.Max(140, workArea.Height - 24));
+        var virtualLeft = SystemParameters.VirtualScreenLeft;
+        var virtualTop = SystemParameters.VirtualScreenTop;
+        var virtualRight = virtualLeft + SystemParameters.VirtualScreenWidth;
+        var virtualBottom = virtualTop + SystemParameters.VirtualScreenHeight;
+
+        var clampedLeft = Math.Clamp(_box.Left, virtualLeft, Math.Max(virtualLeft, virtualRight - logicalWidth));
+        var clampedTop = Math.Clamp(_box.Top, virtualTop, Math.Max(virtualTop, virtualBottom - logicalHeight));
+
+        Left = clampedLeft - ShadowPadding;
+        Top = clampedTop - ShadowPadding;
+        Width = logicalWidth + ShadowPadding * 2;
+        Height = (_box.IsCollapsed ? CollapsedCardHeight : logicalHeight) + ShadowPadding * 2;
 
         SourceInitialized += OnSourceInitialized;
+        Deactivated += (_, _) => UnselectAll();
         Loaded += (_, _) =>
         {
             ApplyVisualSettings();
@@ -183,6 +195,13 @@ public partial class DesktopBoxWindow : Window
         var items = LoadCurrentItems();
         ItemsWrapPanel.Children.Clear();
 
+        if (_selectedItemId is not null &&
+            !items.Any(i => string.Equals(i.Id, _selectedItemId, StringComparison.Ordinal)))
+        {
+            _selectedItemId = null;
+            _selectedItem = null;
+        }
+
         if (items.Count == 0)
         {
             EmptyStatePanel.Visibility = Visibility.Visible;
@@ -255,7 +274,7 @@ public partial class DesktopBoxWindow : Window
             Padding = new Thickness(5, 7, 5, 7),
             CornerRadius = new CornerRadius(10),
             BorderThickness = new Thickness(1),
-            BorderBrush = Brushes.Transparent,
+            BorderBrush = isSelected ? (Brush)FindResource("DgHoverBorderBrush") : Brushes.Transparent,
             Background = isSelected ? (Brush)FindResource("DgSelectedBrush") : Brushes.Transparent,
             Cursor = Cursors.Hand,
             Tag = item,
@@ -454,10 +473,51 @@ public partial class DesktopBoxWindow : Window
         }
     }
 
+    public void UnselectAll()
+    {
+        if (_selectedItemId is null && _selectedItem is null)
+            return;
+
+        _selectedItemId = null;
+        _selectedItem = null;
+        foreach (var child in ItemsWrapPanel.Children.OfType<Border>())
+        {
+            child.Background = Brushes.Transparent;
+            child.BorderBrush = Brushes.Transparent;
+        }
+    }
+
+    private bool IsInsideItemTile(DependencyObject? source)
+    {
+        var current = source;
+        while (current is not null && !ReferenceEquals(current, RootCard))
+        {
+            if (current is Border border &&
+                border.Tag is BoxItem &&
+                ReferenceEquals(VisualTreeHelper.GetParent(border), ItemsWrapPanel))
+            {
+                return true;
+            }
+
+            current = current is Visual or System.Windows.Media.Media3D.Visual3D
+                ? VisualTreeHelper.GetParent(current) ?? LogicalTreeHelper.GetParent(current)
+                : LogicalTreeHelper.GetParent(current);
+        }
+
+        return false;
+    }
+
+    private void OnBoxCardMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
+    {
+        if (!IsInsideItemTile(e.OriginalSource as DependencyObject))
+            UnselectAll();
+    }
+
     private void OpenBoxItem(BoxItem item)
     {
         if (_box.Mode == BoxMode.FolderPortal && item.Kind == BoxItemKind.Folder && Directory.Exists(item.TargetPath))
         {
+            UnselectAll();
             _currentSubfolderPath = item.TargetPath;
             ApplyVisualSettings();
             RefreshItems();
@@ -479,6 +539,7 @@ public partial class DesktopBoxWindow : Window
         if (string.IsNullOrWhiteSpace(_currentSubfolderPath) || string.IsNullOrWhiteSpace(_box.FolderPath))
             return;
 
+        UnselectAll();
         var parent = Directory.GetParent(_currentSubfolderPath)?.FullName;
         var root = Path.GetFullPath(_box.FolderPath).TrimEnd('\\', '/');
         if (parent is null || string.Equals(parent.TrimEnd('\\', '/'), root, StringComparison.OrdinalIgnoreCase))
@@ -639,7 +700,20 @@ public partial class DesktopBoxWindow : Window
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
-        if (_isRenaming || _selectedItem is null)
+        if (_isRenaming)
+            return;
+
+        if (e.Key == Key.Escape)
+        {
+            if (_selectedItem is not null || _selectedItemId is not null)
+            {
+                UnselectAll();
+                e.Handled = true;
+            }
+            return;
+        }
+
+        if (_selectedItem is null)
             return;
 
         if (e.Key == Key.F2)
@@ -661,6 +735,8 @@ public partial class DesktopBoxWindow : Window
 
     private void OnTitleBarMouseDown(object sender, MouseButtonEventArgs e)
     {
+        UnselectAll();
+
         if (e.ClickCount == 2)
         {
             ToggleCollapse();
@@ -757,6 +833,8 @@ public partial class DesktopBoxWindow : Window
     {
         _box.IsCollapsed = !_box.IsCollapsed;
         _isHoverExpanded = false;
+        if (_box.IsCollapsed)
+            UnselectAll();
         _boxManager.UpdateBox(_box);
         ApplyCollapseVisuals();
     }
@@ -781,6 +859,7 @@ public partial class DesktopBoxWindow : Window
 
     private void OnBoxCardRightClick(object sender, MouseButtonEventArgs e)
     {
+        UnselectAll();
         ShowBoxOptionsMenu(RootCard, PlacementMode.MousePoint);
         e.Handled = true;
     }

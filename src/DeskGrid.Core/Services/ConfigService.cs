@@ -148,6 +148,15 @@ public sealed class ConfigService
             if (parsed is null)
                 return false;
 
+            if (!HasRootProperty(json, "showDock") && parsed.Dock is not null)
+            {
+                parsed.ShowDock = parsed.Dock.Enabled;
+            }
+            else if (parsed.Dock is not null)
+            {
+                parsed.Dock.Enabled = parsed.ShowDock;
+            }
+
             config = parsed;
             return true;
         }
@@ -157,11 +166,38 @@ public sealed class ConfigService
         }
     }
 
+    private static bool HasRootProperty(string json, string propertyName)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json, new JsonDocumentOptions
+            {
+                AllowTrailingCommas = true,
+                CommentHandling = JsonCommentHandling.Skip
+            });
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return false;
+
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (string.Equals(prop.Name, propertyName, StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch
+        {
+            // Ignore malformed structure; Deserialize already succeeded
+        }
+
+        return false;
+    }
+
     private static AppConfig Sanitize(AppConfig config)
     {
         config.Appearance ??= new AppearanceSettings();
         config.Behavior ??= new BehaviorSettings();
         config.Dock ??= new DockConfig();
+        config.Dock.Enabled = config.ShowDock;
         config.Dock.PinnedItems ??= [];
         config.Boxes ??= [];
 

@@ -1,3 +1,5 @@
+using System.IO;
+using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using DeskGrid.App.Helpers;
@@ -8,11 +10,15 @@ namespace DeskGrid.App.Services;
 
 public sealed class TrayIconController : IDisposable
 {
+    private static readonly Uri AppIconPackUri = new("pack://application:,,,/Assets/app.ico", UriKind.Absolute);
+
     private readonly NativeTrayIcon _trayIcon = new();
     private readonly INativeDesktopIconService _nativeIcons;
     private readonly Func<bool> _areBoxesVisible;
+    private readonly Func<bool> _isDockVisible;
     private readonly Action _onCreateBox;
     private readonly Action _onToggleBoxes;
+    private readonly Action _onToggleDock;
     private readonly Action _onToggleNativeIcons;
     private readonly Action _onRestoreTaskbar;
     private readonly Action _onOpenSettings;
@@ -21,8 +27,10 @@ public sealed class TrayIconController : IDisposable
     public TrayIconController(
         INativeDesktopIconService nativeIcons,
         Func<bool> areBoxesVisible,
+        Func<bool> isDockVisible,
         Action onCreateBox,
         Action onToggleBoxes,
+        Action onToggleDock,
         Action onToggleNativeIcons,
         Action onRestoreTaskbar,
         Action onOpenSettings,
@@ -30,8 +38,10 @@ public sealed class TrayIconController : IDisposable
     {
         _nativeIcons = nativeIcons;
         _areBoxesVisible = areBoxesVisible;
+        _isDockVisible = isDockVisible;
         _onCreateBox = onCreateBox;
         _onToggleBoxes = onToggleBoxes;
+        _onToggleDock = onToggleDock;
         _onToggleNativeIcons = onToggleNativeIcons;
         _onRestoreTaskbar = onRestoreTaskbar;
         _onOpenSettings = onOpenSettings;
@@ -39,7 +49,26 @@ public sealed class TrayIconController : IDisposable
 
         _trayIcon.LeftDoubleClicked += (_, _) => _onToggleBoxes();
         _trayIcon.RightClicked += (_, _) => ShowFluentTrayMenu();
-        _trayIcon.Show("DeskGrid - 桌面整理助手");
+        _trayIcon.Show("DeskGrid - 桌面整理助手", LoadAppIconBytes());
+    }
+
+    private static byte[]? LoadAppIconBytes()
+    {
+        try
+        {
+            var streamInfo = Application.GetResourceStream(AppIconPackUri);
+            if (streamInfo?.Stream is null)
+                return null;
+
+            using var stream = streamInfo.Stream;
+            using var ms = new MemoryStream();
+            stream.CopyTo(ms);
+            return ms.ToArray();
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void ShowFluentTrayMenu()
@@ -57,6 +86,13 @@ public sealed class TrayIconController : IDisposable
         };
         toggleBoxesMi.Click += (_, _) => _onToggleBoxes();
         menu.Items.Add(toggleBoxesMi);
+
+        var toggleDockMi = new MenuItem
+        {
+            Header = _isDockVisible() ? "隐藏 Dock 栏" : "显示 Dock 栏"
+        };
+        toggleDockMi.Click += (_, _) => _onToggleDock();
+        menu.Items.Add(toggleDockMi);
 
         var toggleNativeMi = new MenuItem
         {
