@@ -17,6 +17,7 @@ public partial class DesktopBoxWindow : Window
 {
     public const double ShadowPadding = 14.0;
     private const double CollapsedCardHeight = 40.0;
+    private static readonly SolidColorBrush DangerMenuBrush = CreateFrozenBrush(Color.FromRgb(0xFF, 0x8A, 0x8A));
 
     private readonly BoxConfig _box;
     private readonly AppConfig _appConfig;
@@ -24,6 +25,8 @@ public partial class DesktopBoxWindow : Window
     private readonly DockManager _dockManager;
     private readonly ShellIconService _shellService;
     private readonly Func<string, IEnumerable<RectBounds>> _siblingBoundsProvider;
+    private readonly Action _onShowDock;
+    private readonly Action _onSafeExit;
 
     private readonly DispatcherTimer _hoverExpandTimer;
     private readonly DispatcherTimer _hoverCollapseTimer;
@@ -56,7 +59,9 @@ public partial class DesktopBoxWindow : Window
         BoxManager boxManager,
         DockManager dockManager,
         ShellIconService shellService,
-        Func<string, IEnumerable<RectBounds>> siblingBoundsProvider)
+        Func<string, IEnumerable<RectBounds>> siblingBoundsProvider,
+        Action onShowDock,
+        Action onSafeExit)
     {
         InitializeComponent();
 
@@ -66,6 +71,8 @@ public partial class DesktopBoxWindow : Window
         _dockManager = dockManager;
         _shellService = shellService;
         _siblingBoundsProvider = siblingBoundsProvider;
+        _onShowDock = onShowDock;
+        _onSafeExit = onSafeExit;
 
         _hoverExpandTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
         _hoverExpandTimer.Tick += (_, _) =>
@@ -967,8 +974,43 @@ public partial class DesktopBoxWindow : Window
         };
         menu.Items.Add(removeBoxMi);
 
+        // Anti-deadlock fallback: when native taskbar is auto-hidden AND bottom Dock is disabled,
+        // guarantee at least one accessible recovery and safe-exit path on desktop box menus.
+        if (_appConfig.Dock.AutoHideSystemTaskbar && !_appConfig.ShowDock)
+        {
+            menu.Items.Add(new Separator());
+
+            var showDockMi = new MenuItem { Header = "显示底部 Dock 栏" };
+            showDockMi.Click += (_, _) =>
+            {
+                menu.IsOpen = false;
+                _onShowDock();
+            };
+            menu.Items.Add(showDockMi);
+
+            var safeExitMi = new MenuItem
+            {
+                Header = "安全退出 DeskGrid",
+                Foreground = DangerMenuBrush,
+                FontWeight = FontWeights.SemiBold
+            };
+            safeExitMi.Click += (_, _) =>
+            {
+                menu.IsOpen = false;
+                _onSafeExit();
+            };
+            menu.Items.Add(safeExitMi);
+        }
+
         menu.PlacementTarget = placementTarget;
         menu.IsOpen = true;
+    }
+
+    private static SolidColorBrush CreateFrozenBrush(Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
     }
 
     private static void AddCheckItem(MenuItem parent, string header, bool isChecked, Action onClick)

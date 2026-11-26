@@ -16,6 +16,8 @@ namespace DeskGrid.App.Views;
 
 public partial class DockWindow : Window
 {
+    private static readonly SolidColorBrush DangerMenuBrush = CreateFrozenBrush(Color.FromRgb(0xFF, 0x8A, 0x8A));
+
     private readonly AppConfig _appConfig;
     private readonly DockManager _dockManager;
     private readonly IWindowTracker _windowTracker;
@@ -25,6 +27,8 @@ public partial class DockWindow : Window
     private readonly Action _onToggleBoxes;
     private readonly Action _onCreateBox;
     private readonly Action _onOpenSettings;
+    private readonly Action _onShowSystemTaskbar;
+    private readonly Action _onSafeExit;
 
     private readonly DispatcherTimer _clockTimer;
     private string _lastClockTimeText = string.Empty;
@@ -32,6 +36,7 @@ public partial class DockWindow : Window
     private string _lastClockTooltipText = string.Empty;
 
     private WindowListPopup? _activePopup;
+    private ContextMenu? _activeContextMenu;
     private Point _dragStartPoint;
     private DockSlotItem? _dragCandidate;
     private Border? _dragCandidateTile;
@@ -48,7 +53,9 @@ public partial class DockWindow : Window
         ShellIconService shellService,
         Action onToggleBoxes,
         Action onCreateBox,
-        Action onOpenSettings)
+        Action onOpenSettings,
+        Action onShowSystemTaskbar,
+        Action onSafeExit)
     {
         InitializeComponent();
 
@@ -60,6 +67,8 @@ public partial class DockWindow : Window
         _onToggleBoxes = onToggleBoxes;
         _onCreateBox = onCreateBox;
         _onOpenSettings = onOpenSettings;
+        _onShowSystemTaskbar = onShowSystemTaskbar;
+        _onSafeExit = onSafeExit;
 
         _clockTimer = new DispatcherTimer
         {
@@ -305,6 +314,7 @@ public partial class DockWindow : Window
     {
         _clockTimer.Stop();
         PowerMenuPopup.IsOpen = false;
+        CloseActiveContextMenu();
         try { _activePopup?.Close(); } catch { }
         _activePopup = null;
         if (IsVisible)
@@ -612,23 +622,82 @@ public partial class DockWindow : Window
         popup.Show();
     }
 
+    private static SolidColorBrush CreateFrozenBrush(Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
+    }
+
+    private void CloseActiveContextMenu()
+    {
+        if (_activeContextMenu is not null)
+        {
+            _activeContextMenu.IsOpen = false;
+            _activeContextMenu = null;
+        }
+    }
+
+    private void AppendDockSystemMenuItems(ContextMenu menu)
+    {
+        menu.Items.Add(new Separator());
+
+        if (_appConfig.Dock.AutoHideSystemTaskbar)
+        {
+            var showTaskbarMi = new MenuItem { Header = "显示系统任务栏" };
+            showTaskbarMi.Click += (_, _) =>
+            {
+                menu.IsOpen = false;
+                _onShowSystemTaskbar();
+            };
+            menu.Items.Add(showTaskbarMi);
+        }
+
+        var safeExitMi = new MenuItem
+        {
+            Header = "安全退出 DeskGrid",
+            Foreground = DangerMenuBrush,
+            FontWeight = FontWeights.SemiBold
+        };
+        safeExitMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onSafeExit();
+        };
+        menu.Items.Add(safeExitMi);
+    }
+
     private void OnDockBackgroundRightClick(object sender, MouseButtonEventArgs e)
     {
         PowerMenuPopup.IsOpen = false;
+        CloseActiveContextMenu();
         PinnedPanel.SmoothResetScales();
         RunningPanel.SmoothResetScales();
 
         var menu = ThemePalette.CreateThemedContextMenu();
         menu.Placement = PlacementMode.MousePoint;
+        menu.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_activeContextMenu, menu))
+                _activeContextMenu = null;
+        };
 
         var addPinnedMi = new MenuItem { Header = "添加固定应用..." };
-        addPinnedMi.Click += (_, _) => PromptAddPinnedApps();
+        addPinnedMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            PromptAddPinnedApps();
+        };
         menu.Items.Add(addPinnedMi);
 
         menu.Items.Add(new Separator());
 
         var newBoxMi = new MenuItem { Header = "新建桌面盒子..." };
-        newBoxMi.Click += (_, _) => _onCreateBox();
+        newBoxMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onCreateBox();
+        };
         menu.Items.Add(newBoxMi);
 
         var settingsMi = new MenuItem { Header = "偏好设置..." };
@@ -639,7 +708,10 @@ public partial class DockWindow : Window
         };
         menu.Items.Add(settingsMi);
 
+        AppendDockSystemMenuItems(menu);
+
         menu.PlacementTarget = DockPill;
+        _activeContextMenu = menu;
         menu.IsOpen = true;
         e.Handled = true;
     }
@@ -859,9 +931,50 @@ public partial class DockWindow : Window
     private void OnOpenSettings(object sender, RoutedEventArgs e)
     {
         PowerMenuPopup.IsOpen = false;
+        CloseActiveContextMenu();
+        PinnedPanel.SmoothResetScales();
+        RunningPanel.SmoothResetScales();
         try { _activePopup?.Close(); } catch { }
         _activePopup = null;
-        _onOpenSettings();
+
+        var menu = ThemePalette.CreateThemedContextMenu();
+        menu.Placement = PlacementMode.Top;
+        menu.VerticalOffset = -8;
+        menu.PlacementTarget = SettingsButton;
+        menu.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_activeContextMenu, menu))
+                _activeContextMenu = null;
+        };
+
+        var settingsMi = new MenuItem { Header = "偏好设置..." };
+        settingsMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onOpenSettings();
+        };
+        menu.Items.Add(settingsMi);
+
+        var addPinnedMi = new MenuItem { Header = "添加固定应用..." };
+        addPinnedMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            PromptAddPinnedApps();
+        };
+        menu.Items.Add(addPinnedMi);
+
+        var newBoxMi = new MenuItem { Header = "新建桌面盒子..." };
+        newBoxMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onCreateBox();
+        };
+        menu.Items.Add(newBoxMi);
+
+        AppendDockSystemMenuItems(menu);
+
+        _activeContextMenu = menu;
+        menu.IsOpen = true;
     }
 
     private int FindPinnedTileIndex(string itemId)

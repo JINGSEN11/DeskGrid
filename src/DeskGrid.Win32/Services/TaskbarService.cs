@@ -1,15 +1,18 @@
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using DeskGrid.Core.Abstractions;
+using DeskGrid.Core.Services;
 using DeskGrid.Win32.Interop;
 
 namespace DeskGrid.Win32.Services;
 
 /// <summary>
 /// Hides and restores Windows 10/11 (including Win11 24H2/25H2 Build 26200) native taskbars safely.
-/// Uses AppBar ABS_AUTOHIDE + ShowWindow/SetWindowPos SWP_HIDEWINDOW + lightweight visibility watchdog
-/// to eliminate bottom-edge badge/red-dot artifacts, and persists original AppBar state in a crash sentinel
-/// so normal exit or crash recovery restores 100% of original taskbar state.
+/// Uses AppBar ABS_AUTOHIDE + ShowWindow/SetWindowPos SWP_HIDEWINDOW + lightweight visibility guard,
+/// durable sentinel file (taskbar_hidden.flag) for crash/power-loss recovery, and an out-of-process
+/// parent-handle watchdog (DeskGrid.exe --watchdog &lt;pid&gt;) to restore taskbars even after TerminateProcess.
 /// </summary>
 public sealed class TaskbarService : ITaskbarService
 {
@@ -25,11 +28,16 @@ public sealed class TaskbarService : ITaskbarService
         NativeMethods.SWP_NOSIZE |
         NativeMethods.SWP_NOZORDER |
         NativeMethods.SWP_NOACTIVATE |
+        NativeMethods.SWP_FRAMECHANGED |
         NativeMethods.SWP_SHOWWINDOW;
 
+    private readonly string _configDirectory;
     private readonly string _sentinelFilePath;
+    private readonly string _legacySentinelFilePath;
     private readonly object _lock = new();
     private Timer? _enforceHiddenTimer;
+    private Process? _watchdogProcess;
+    private EventWaitHandle? _watchdogCancelEvent;
     private int? _originalAppBarState;
     private bool _isHiddenByApp;
     private bool _disposed;
@@ -38,20 +46,52 @@ public sealed class TaskbarService : ITaskbarService
 
     public TaskbarService(string configDirectory)
     {
-        _sentinelFilePath = Path.Combine(configDirectory, "taskbar.hidden.flag");
+        _configDirectory = configDirectory;
+        _sentinelFilePath = Path.Combine(configDirectory, TaskbarWatchdogProtocol.PrimarySentinelFileName);
+        _legacySentinelFilePath = Path.Combine(configDirectory, TaskbarWatchdogProtocol.LegacySentinelFileName);
+    }
+
+    public static bool HasSentinelFile(string configDirectory)
+    {
+        if (string.IsNullOrWhiteSpace(configDirectory))
+            return false;
+
+        var primary = Path.Combine(configDirectory, TaskbarWatchdogProtocol.PrimarySentinelFileName);
+        var legacy = Path.Combine(configDirectory, TaskbarWatchdogProtocol.LegacySentinelFileName);
+        return File.Exists(primary) || File.Exists(legacy);
+    }
+
+    /// <summary>
+    /// Static restoration entry point used by the out-of-process watchdog after TerminateProcess / crash.
+    /// Restores AppBar state, shows primary and all secondary monitor taskbars, broadcasts WM_SETTINGCHANGE,
+    /// and removes persisted sentinel files.
+    /// </summary>
+    public static void RestoreTaskbar(string configDirectory)
+    {
+        var primary = Path.Combine(configDirectory, TaskbarWatchdogProtocol.PrimarySentinelFileName);
+        var legacy = Path.Combine(configDirectory, TaskbarWatchdogProtocol.LegacySentinelFileName);
+        var savedState = ReadSentinelOriginalState(primary, legacy);
+
+        RestoreAppBarState(savedState);
+        ShowAllTaskbars();
+        BroadcastWorkAreaRefresh();
+        TryDeleteFile(primary);
+        TryDeleteFile(legacy);
     }
 
     public void RecoverFromCrashIfNeeded()
     {
         lock (_lock)
         {
-            if (File.Exists(_sentinelFilePath))
+            if (HasAnySentinelLocked())
             {
-                var savedState = ReadSentinelOriginalState();
+                var savedState = ReadSentinelOriginalState(_sentinelFilePath, _legacySentinelFilePath);
                 StopEnforceTimerLocked();
+                StopWatchdogLocked();
                 RestoreAppBarState(savedState);
                 ShowAllTaskbars();
-                TryDeleteSentinel();
+                BroadcastWorkAreaRefresh();
+                TryDeleteAllSentinelsLocked();
                 _originalAppBarState = null;
                 _isHiddenByApp = false;
             }
@@ -77,20 +117,20 @@ public sealed class TaskbarService : ITaskbarService
                 HideAllTaskbars();
                 _isHiddenByApp = true;
                 StartEnforceTimerLocked();
+                EnsureWatchdogRunningLocked();
             }
             else
             {
-                StopEnforceTimerLocked();
-                var restoreState = _originalAppBarState ?? ReadSentinelOriginalState();
-                if (_isHiddenByApp || File.Exists(_sentinelFilePath))
-                {
-                    RestoreAppBarState(restoreState);
-                }
-                ShowAllTaskbars();
-                TryDeleteSentinel();
-                _originalAppBarState = null;
-                _isHiddenByApp = false;
+                RestoreTaskbarLocked(forceAppBarRestore: _isHiddenByApp || HasAnySentinelLocked());
             }
+        }
+    }
+
+    public void RestoreTaskbar()
+    {
+        lock (_lock)
+        {
+            RestoreTaskbarLocked(forceAppBarRestore: true);
         }
     }
 
@@ -98,17 +138,134 @@ public sealed class TaskbarService : ITaskbarService
     {
         lock (_lock)
         {
-            if (_isHiddenByApp || File.Exists(_sentinelFilePath))
+            if (_isHiddenByApp || HasAnySentinelLocked())
             {
-                StopEnforceTimerLocked();
-                var restoreState = _originalAppBarState ?? ReadSentinelOriginalState();
-                RestoreAppBarState(restoreState);
-                ShowAllTaskbars();
-                TryDeleteSentinel();
-                _originalAppBarState = null;
-                _isHiddenByApp = false;
+                RestoreTaskbarLocked(forceAppBarRestore: true);
+            }
+            else
+            {
+                StopWatchdogLocked();
             }
         }
+    }
+
+    private void RestoreTaskbarLocked(bool forceAppBarRestore)
+    {
+        StopEnforceTimerLocked();
+        StopWatchdogLocked();
+
+        var restoreState = _originalAppBarState ?? ReadSentinelOriginalState(_sentinelFilePath, _legacySentinelFilePath);
+        if (forceAppBarRestore)
+            RestoreAppBarState(restoreState);
+
+        ShowAllTaskbars();
+        BroadcastWorkAreaRefresh();
+        TryDeleteAllSentinelsLocked();
+        _originalAppBarState = null;
+        _isHiddenByApp = false;
+    }
+
+    private void EnsureWatchdogRunningLocked()
+    {
+        try
+        {
+            if (_watchdogProcess is not null)
+            {
+                if (!_watchdogProcess.HasExited)
+                    return;
+
+                _watchdogProcess.Dispose();
+                _watchdogProcess = null;
+            }
+        }
+        catch
+        {
+            _watchdogProcess?.Dispose();
+            _watchdogProcess = null;
+        }
+
+        _watchdogCancelEvent?.Dispose();
+        _watchdogCancelEvent = null;
+
+        try
+        {
+            var exePath = Environment.ProcessPath;
+            if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
+                return;
+
+            // Avoid launching watchdog if hosted inside an external runner such as dotnet.exe
+            var exeName = Path.GetFileNameWithoutExtension(exePath);
+            if (string.Equals(exeName, "dotnet", StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var cancelEventName = $"Local\\DeskGrid_TaskbarWatchdog_Cancel_{Environment.ProcessId}_{Guid.NewGuid():N}";
+            var cancelEvent = new EventWaitHandle(false, EventResetMode.ManualReset, cancelEventName);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = exePath,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+
+            foreach (var arg in TaskbarWatchdogProtocol.BuildArgs(Environment.ProcessId, _configDirectory, cancelEventName))
+                psi.ArgumentList.Add(arg);
+
+            var proc = Process.Start(psi);
+            if (proc is null)
+            {
+                cancelEvent.Dispose();
+                return;
+            }
+
+            _watchdogCancelEvent = cancelEvent;
+            _watchdogProcess = proc;
+        }
+        catch
+        {
+            // Best-effort watchdog startup; durable taskbar_hidden.flag still provides fallback recovery
+            _watchdogCancelEvent?.Dispose();
+            _watchdogCancelEvent = null;
+            _watchdogProcess?.Dispose();
+            _watchdogProcess = null;
+        }
+    }
+
+    private void StopWatchdogLocked()
+    {
+        try
+        {
+            _watchdogCancelEvent?.Set();
+        }
+        catch
+        {
+            // Ignore
+        }
+
+        if (_watchdogProcess is not null)
+        {
+            try
+            {
+                if (!_watchdogProcess.HasExited)
+                {
+                    if (!_watchdogProcess.WaitForExit(250))
+                        _watchdogProcess.Kill(entireProcessTree: false);
+                }
+            }
+            catch
+            {
+                // Ignore if already exited
+            }
+            finally
+            {
+                _watchdogProcess.Dispose();
+                _watchdogProcess = null;
+            }
+        }
+
+        _watchdogCancelEvent?.Dispose();
+        _watchdogCancelEvent = null;
     }
 
     private void StartEnforceTimerLocked()
@@ -226,6 +383,27 @@ public sealed class TaskbarService : ITaskbarService
         }
     }
 
+    private static void BroadcastWorkAreaRefresh()
+    {
+        try
+        {
+            // Non-blocking broadcast (SMTO_ABORTIFHUNG) notifies desktop shell and top-level apps
+            // to refresh their working area without ever hanging on unresponsive windows.
+            NativeMethods.SendMessageTimeout(
+                NativeMethods.HWND_BROADCAST,
+                NativeMethods.WM_SETTINGCHANGE,
+                (nint)NativeMethods.SPI_SETWORKAREA,
+                "TraySettings",
+                NativeMethods.SMTO_ABORTIFHUNG | NativeMethods.SMTO_NORMAL,
+                250,
+                out _);
+        }
+        catch
+        {
+            // Best-effort broadcast
+        }
+    }
+
     private static List<nint> FindTaskbarWindows()
     {
         var list = new List<nint>();
@@ -245,6 +423,9 @@ public sealed class TaskbarService : ITaskbarService
         return list;
     }
 
+    private bool HasAnySentinelLocked() =>
+        File.Exists(_sentinelFilePath) || File.Exists(_legacySentinelFilePath);
+
     private void WriteSentinel(int originalAppBarState)
     {
         try
@@ -252,7 +433,18 @@ public sealed class TaskbarService : ITaskbarService
             var dir = Path.GetDirectoryName(_sentinelFilePath);
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
-            File.WriteAllText(_sentinelFilePath, $"{DateTime.UtcNow:O}|{originalAppBarState}");
+
+            var payload = TaskbarWatchdogProtocol.FormatSentinel(DateTime.UtcNow, originalAppBarState, Environment.ProcessId);
+            var bytes = Encoding.UTF8.GetBytes(payload);
+            using var fs = new FileStream(
+                _sentinelFilePath,
+                FileMode.Create,
+                FileAccess.Write,
+                FileShare.Read,
+                bufferSize: 4096,
+                FileOptions.WriteThrough);
+            fs.Write(bytes, 0, bytes.Length);
+            fs.Flush(flushToDisk: true);
         }
         catch
         {
@@ -260,32 +452,40 @@ public sealed class TaskbarService : ITaskbarService
         }
     }
 
-    private int? ReadSentinelOriginalState()
+    private static int? ReadSentinelOriginalState(string primaryPath, string legacyPath)
     {
-        try
+        foreach (var path in new[] { primaryPath, legacyPath })
         {
-            if (!File.Exists(_sentinelFilePath))
-                return null;
+            try
+            {
+                if (!File.Exists(path))
+                    continue;
 
-            var content = File.ReadAllText(_sentinelFilePath).Trim();
-            var parts = content.Split('|');
-            if (parts.Length >= 2 && int.TryParse(parts[1], out var state))
-                return state;
-        }
-        catch
-        {
-            // Ignore malformed sentinel; fallback to standard non-autohide state (0)
+                var content = File.ReadAllText(path);
+                if (TaskbarWatchdogProtocol.TryParseSentinelOriginalState(content, out var state))
+                    return state;
+            }
+            catch
+            {
+                // Ignore malformed sentinel; fallback to standard non-autohide state (0)
+            }
         }
 
         return 0;
     }
 
-    private void TryDeleteSentinel()
+    private void TryDeleteAllSentinelsLocked()
+    {
+        TryDeleteFile(_sentinelFilePath);
+        TryDeleteFile(_legacySentinelFilePath);
+    }
+
+    private static void TryDeleteFile(string path)
     {
         try
         {
-            if (File.Exists(_sentinelFilePath))
-                File.Delete(_sentinelFilePath);
+            if (File.Exists(path))
+                File.Delete(path);
         }
         catch
         {

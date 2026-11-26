@@ -24,6 +24,7 @@ public interface ITaskbarService : IDisposable
 {
     bool IsHiddenByApp { get; }
     void SetTaskbarHidden(bool hidden);
+    void RestoreTaskbar();
     void RestoreIfHidden();
     void RecoverFromCrashIfNeeded();
 }

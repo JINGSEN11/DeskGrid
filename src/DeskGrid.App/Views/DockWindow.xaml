@@ -120,7 +120,7 @@
                         <Button x:Name="SettingsButton"
                                 Content="&#xE713;"
                                 Style="{StaticResource DgDockToolButtonStyle}"
-                                ToolTip="偏好设置"
+                                ToolTip="设置与系统菜单"
                                 Margin="3,0,0,0"
                                 Click="OnOpenSettings"/>
                     </StackPanel>

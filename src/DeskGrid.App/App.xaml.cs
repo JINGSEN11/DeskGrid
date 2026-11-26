@@ -117,7 +117,9 @@ public partial class App : Application
             _shellService,
             ToggleAllBoxesVisibility,
             OpenCreateBoxDialog,
-            ShowSettingsWindow);
+            ShowSettingsWindow,
+            ShowSystemTaskbarAndDisableAutoHide,
+            ShutdownSafely);
 
         if (_config.ShowDock)
             _dockWindow.Show();
@@ -153,7 +155,9 @@ public partial class App : Application
             _boxManager,
             _dockManager,
             _shellService,
-            GetSiblingBounds);
+            GetSiblingBounds,
+            ShowDockBar,
+            ShutdownSafely);
 
         _boxWindows[box.Id] = win;
         if (_config.Behavior.BoxesVisible)
@@ -197,6 +201,39 @@ public partial class App : Application
         _config.Dock.Enabled = _config.ShowDock;
         _configService.Save(_config);
         ApplyAllSettingsLive();
+        if (_settingsWindow is { IsClosed: false, IsLoaded: true })
+            _settingsWindow.SyncFromConfig();
+    }
+
+    private void ShowDockBar()
+    {
+        if (_config.ShowDock)
+            return;
+
+        _config.ShowDock = true;
+        _config.Dock.Enabled = true;
+        _configService.Save(_config);
+        ApplyAllSettingsLive();
+        if (_settingsWindow is { IsClosed: false, IsLoaded: true })
+            _settingsWindow.SyncFromConfig();
+    }
+
+    private void ShowSystemTaskbarAndDisableAutoHide()
+    {
+        _config.Dock.AutoHideSystemTaskbar = false;
+        _configService.Save(_config);
+        _taskbarService.RestoreTaskbar();
+
+        if (_config.ShowDock)
+        {
+            _dockWindow?.RepositionDock();
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
+            {
+                if (_config.ShowDock)
+                    _dockWindow?.RepositionDock();
+            });
+        }
+
         if (_settingsWindow is { IsClosed: false, IsLoaded: true })
             _settingsWindow.SyncFromConfig();
     }
@@ -245,7 +282,8 @@ public partial class App : Application
                 ApplyAllSettingsLive,
                 ApplyGlobalBoxOpacityLive,
                 ReplaceConfigAndReload,
-                EmergencyRestoreSystemState);
+                EmergencyRestoreSystemState,
+                ShutdownSafely);
 
             // Never bind Owner to HWND_BOTTOM DesktopBoxWindow or WS_EX_NOACTIVATE DockWindow
             window.Owner = null;
@@ -459,7 +497,9 @@ public partial class App : Application
             _shellService,
             ToggleAllBoxesVisibility,
             OpenCreateBoxDialog,
-            ShowSettingsWindow);
+            ShowSettingsWindow,
+            ShowSystemTaskbarAndDisableAutoHide,
+            ShutdownSafely);
 
         if (_config.ShowDock)
             _dockWindow.Show();
@@ -469,7 +509,7 @@ public partial class App : Application
 
     private void EmergencyRestoreSystemState()
     {
-        _taskbarService.RestoreIfHidden();
+        _taskbarService.RestoreTaskbar();
         _nativeIcons.SetIconsVisible(true);
         _dockWindow?.UpdateQuickToolStates();
         _dockWindow?.RepositionDock();

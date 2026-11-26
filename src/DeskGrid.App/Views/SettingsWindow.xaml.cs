@@ -17,6 +17,7 @@ public partial class SettingsWindow : Window
     private readonly Action<double> _onGlobalBoxOpacityChanged;
     private readonly Action<AppConfig> _onConfigReplaced;
     private readonly Action _onEmergencyRestore;
+    private readonly Action _onSafeExit;
     private readonly DispatcherTimer _opacitySaveDebounceTimer;
     private bool _hasPendingOpacitySave;
     private bool _loading = true;
@@ -29,7 +30,8 @@ public partial class SettingsWindow : Window
         Action onSettingsApplied,
         Action<double> onGlobalBoxOpacityChanged,
         Action<AppConfig> onConfigReplaced,
-        Action onEmergencyRestore)
+        Action onEmergencyRestore,
+        Action onSafeExit)
     {
         _config = config ?? throw new ArgumentNullException(nameof(config));
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
@@ -37,6 +39,7 @@ public partial class SettingsWindow : Window
         _onGlobalBoxOpacityChanged = onGlobalBoxOpacityChanged ?? throw new ArgumentNullException(nameof(onGlobalBoxOpacityChanged));
         _onConfigReplaced = onConfigReplaced ?? throw new ArgumentNullException(nameof(onConfigReplaced));
         _onEmergencyRestore = onEmergencyRestore ?? throw new ArgumentNullException(nameof(onEmergencyRestore));
+        _onSafeExit = onSafeExit ?? throw new ArgumentNullException(nameof(onSafeExit));
 
         EnsureConfigSections();
 
@@ -299,6 +302,23 @@ public partial class SettingsWindow : Window
             _onConfigReplaced(fresh);
             Close();
         }
+    }
+
+    private void OnNavSectionChanged(object sender, RoutedEventArgs e)
+    {
+        if (!IsInitialized || AppearanceSection is null || DockSection is null || BackupSection is null || AboutSection is null)
+            return;
+
+        AppearanceSection.Visibility = NavAppearanceRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        DockSection.Visibility = NavDockRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        BackupSection.Visibility = NavBackupRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+        AboutSection.Visibility = NavAboutRadio.IsChecked == true ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnSafeExit(object sender, RoutedEventArgs e)
+    {
+        FlushPendingOpacitySave();
+        _onSafeExit();
     }
 
     private void OnWindowClosing(object? sender, CancelEventArgs e) => FlushPendingOpacitySave();

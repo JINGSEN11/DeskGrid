@@ -32,6 +32,7 @@ internal static class NativeMethods
     public static readonly nint HWND_BOTTOM = 1;
     public static readonly nint HWND_TOPMOST = -1;
     public static readonly nint HWND_NOTOPMOST = -2;
+    public static readonly nint HWND_BROADCAST = 0xFFFF;
 
     public const int SW_HIDE = 0;
     public const int SW_SHOWNORMAL = 1;
@@ -41,6 +42,7 @@ internal static class NativeMethods
     public const int SW_RESTORE = 9;
 
     public const uint WM_CLOSE = 0x0010;
+    public const uint WM_SETTINGCHANGE = 0x001A;
     public const uint WM_WINDOWPOSCHANGING = 0x0046;
     public const uint WM_GETICON = 0x007F;
     public const uint WM_COMMAND = 0x0111;
@@ -50,6 +52,10 @@ internal static class NativeMethods
     public const uint WM_LBUTTONDBLCLK = 0x0203;
     public const uint WM_RBUTTONUP = 0x0205;
     public const uint WM_USER = 0x0400;
+
+    public const uint SPI_SETWORKAREA = 0x002F;
+    public const uint SMTO_NORMAL = 0x0000;
+    public const uint SMTO_ABORTIFHUNG = 0x0002;
 
     public const int SC_MINIMIZE = 0xF020;
     public const int ICON_SMALL = 0;
@@ -87,6 +93,10 @@ internal static class NativeMethods
     public const int DWMSBT_TRANSIENTWINDOW = 3; // Acrylic
 
     public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    public const uint SYNCHRONIZE = 0x00100000;
+    public const uint INFINITE = 0xFFFFFFFF;
+    public const uint WAIT_OBJECT_0 = 0x00000000;
+    public const uint WAIT_FAILED = 0xFFFFFFFF;
 
     public const uint SHGFI_ICON = 0x000000100;
     public const uint SHGFI_LARGEICON = 0x000000000;
@@ -370,6 +380,16 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     public static extern nint SendMessage(nint hWnd, uint Msg, nint wParam, nint lParam);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW", SetLastError = true)]
+    public static extern nint SendMessageTimeout(
+        nint hWnd,
+        uint Msg,
+        nint wParam,
+        string? lParam,
+        uint fuFlags,
+        uint uTimeout,
+        out nuint lpdwResult);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool PostMessage(nint hWnd, uint Msg, nint wParam, nint lParam);
@@ -524,6 +544,16 @@ internal static class NativeMethods
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool CloseHandle(nint hObject);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForSingleObject(nint hHandle, uint dwMilliseconds);
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    public static extern uint WaitForMultipleObjects(
+        uint nCount,
+        [In] nint[] lpHandles,
+        [MarshalAs(UnmanagedType.Bool)] bool bWaitAll,
+        uint dwMilliseconds);
 
     public static string GetWindowClassName(nint hwnd)
     {
