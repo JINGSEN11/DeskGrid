@@ -1,9 +1,8 @@
-using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using DeskGrid.Core.Abstractions;
-using DeskGrid.Core.Services;
 using DeskGrid.Win32.Interop;
 
 namespace DeskGrid.Win32.Services;
@@ -11,11 +10,14 @@ namespace DeskGrid.Win32.Services;
 /// <summary>
 /// Hides and restores Windows 10/11 (including Win11 24H2/25H2 Build 26200) native taskbars safely.
 /// Uses AppBar ABS_AUTOHIDE + ShowWindow/SetWindowPos SWP_HIDEWINDOW + lightweight visibility guard,
-/// durable sentinel file (taskbar_hidden.flag) for crash/power-loss recovery, and an out-of-process
-/// parent-handle watchdog (DeskGrid.exe --watchdog &lt;pid&gt;) to restore taskbars even after TerminateProcess.
+/// and persists original AppBar state in a crash sentinel (taskbar_hidden.flag) so normal safe-exit
+/// or restart after an unexpected termination restores the original taskbar state cleanly.
 /// </summary>
 public sealed class TaskbarService : ITaskbarService
 {
+    private const string PrimarySentinelFileName = "taskbar_hidden.flag";
+    private const string LegacySentinelFileName = "taskbar.hidden.flag";
+
     private const uint HideSwpFlags =
         NativeMethods.SWP_NOMOVE |
         NativeMethods.SWP_NOSIZE |
@@ -31,13 +33,10 @@ public sealed class TaskbarService : ITaskbarService
         NativeMethods.SWP_FRAMECHANGED |
         NativeMethods.SWP_SHOWWINDOW;
 
-    private readonly string _configDirectory;
     private readonly string _sentinelFilePath;
     private readonly string _legacySentinelFilePath;
     private readonly object _lock = new();
     private Timer? _enforceHiddenTimer;
-    private Process? _watchdogProcess;
-    private EventWaitHandle? _watchdogCancelEvent;
     private int? _originalAppBarState;
     private bool _isHiddenByApp;
     private bool _disposed;
@@ -46,48 +45,8 @@ public sealed class TaskbarService : ITaskbarService
 
     public TaskbarService(string configDirectory)
     {
-        _configDirectory = configDirectory;
-        _sentinelFilePath = Path.Combine(configDirectory, TaskbarWatchdogProtocol.PrimarySentinelFileName);
-        _legacySentinelFilePath = Path.Combine(configDirectory, TaskbarWatchdogProtocol.LegacySentinelFileName);
-    }
-
-    public static bool HasSentinelFile(string configDirectory)
-    {
-        if (string.IsNullOrWhiteSpace(configDirectory))
-            return false;
-
-        var primary = Path.Combine(configDirectory, TaskbarWatchdogProtocol.PrimarySentinelFileName);
-        var legacy = Path.Combine(configDirectory, TaskbarWatchdogProtocol.LegacySentinelFileName);
-        return File.Exists(primary) || File.Exists(legacy);
-    }
-
-    /// <summary>
-    /// Static restoration entry point used by the out-of-process watchdog after TerminateProcess / crash.
-    /// Restores AppBar state, shows primary and all secondary monitor taskbars, broadcasts WM_SETTINGCHANGE,
-    /// and removes persisted sentinel files.
-    /// </summary>
-    public static void RestoreTaskbar(string configDirectory)
-    {
-        var primary = Path.Combine(configDirectory, TaskbarWatchdogProtocol.PrimarySentinelFileName);
-        var legacy = Path.Combine(configDirectory, TaskbarWatchdogProtocol.LegacySentinelFileName);
-        var savedState = ReadSentinelOriginalState(primary, legacy);
-
-        RestoreAppBarState(savedState);
-        ShowAllTaskbars();
-        BroadcastWorkAreaRefresh();
-
-        // Win11 Explorer may finish re-evaluating AppBar auto-hide state asynchronously; verify visibility once more.
-        var main = NativeMethods.FindWindow("Shell_TrayWnd", null);
-        if (main != 0 && !NativeMethods.IsWindowVisible(main))
-        {
-            Thread.Sleep(120);
-            RestoreAppBarState(savedState);
-            ShowAllTaskbars();
-            BroadcastWorkAreaRefresh();
-        }
-
-        TryDeleteFile(primary);
-        TryDeleteFile(legacy);
+        _sentinelFilePath = Path.Combine(configDirectory, PrimarySentinelFileName);
+        _legacySentinelFilePath = Path.Combine(configDirectory, LegacySentinelFileName);
     }
 
     public void RecoverFromCrashIfNeeded()
@@ -98,7 +57,6 @@ public sealed class TaskbarService : ITaskbarService
             {
                 var savedState = ReadSentinelOriginalState(_sentinelFilePath, _legacySentinelFilePath);
                 StopEnforceTimerLocked();
-                StopWatchdogLocked();
                 RestoreAppBarState(savedState);
                 ShowAllTaskbars();
                 BroadcastWorkAreaRefresh();
@@ -111,29 +69,38 @@ public sealed class TaskbarService : ITaskbarService
 
     public void SetTaskbarHidden(bool hidden)
     {
+        if (hidden)
+        {
+            HideTaskbar();
+            return;
+        }
+
         lock (_lock)
         {
             if (_disposed)
                 return;
 
-            if (hidden)
-            {
-                if (!_isHiddenByApp)
-                {
-                    _originalAppBarState = QueryAppBarState();
-                    WriteSentinel(_originalAppBarState.Value);
-                    SetAppBarAutoHide(_originalAppBarState.Value, enableAutoHide: true);
-                }
+            RestoreTaskbarLocked(forceAppBarRestore: _isHiddenByApp || HasAnySentinelLocked());
+        }
+    }
 
-                HideAllTaskbars();
-                _isHiddenByApp = true;
-                StartEnforceTimerLocked();
-                EnsureWatchdogRunningLocked();
-            }
-            else
+    public void HideTaskbar()
+    {
+        lock (_lock)
+        {
+            if (_disposed)
+                return;
+
+            if (!_isHiddenByApp)
             {
-                RestoreTaskbarLocked(forceAppBarRestore: _isHiddenByApp || HasAnySentinelLocked());
+                _originalAppBarState = QueryAppBarState();
+                WriteSentinel(_originalAppBarState.Value);
+                SetAppBarAutoHide(_originalAppBarState.Value, enableAutoHide: true);
             }
+
+            HideAllTaskbars();
+            _isHiddenByApp = true;
+            StartEnforceTimerLocked();
         }
     }
 
@@ -153,17 +120,12 @@ public sealed class TaskbarService : ITaskbarService
             {
                 RestoreTaskbarLocked(forceAppBarRestore: true);
             }
-            else
-            {
-                StopWatchdogLocked();
-            }
         }
     }
 
     private void RestoreTaskbarLocked(bool forceAppBarRestore)
     {
         StopEnforceTimerLocked();
-        StopWatchdogLocked();
 
         var restoreState = _originalAppBarState ?? ReadSentinelOriginalState(_sentinelFilePath, _legacySentinelFilePath);
         if (forceAppBarRestore)
@@ -174,109 +136,6 @@ public sealed class TaskbarService : ITaskbarService
         TryDeleteAllSentinelsLocked();
         _originalAppBarState = null;
         _isHiddenByApp = false;
-    }
-
-    private void EnsureWatchdogRunningLocked()
-    {
-        try
-        {
-            if (_watchdogProcess is not null)
-            {
-                if (!_watchdogProcess.HasExited)
-                    return;
-
-                _watchdogProcess.Dispose();
-                _watchdogProcess = null;
-            }
-        }
-        catch
-        {
-            _watchdogProcess?.Dispose();
-            _watchdogProcess = null;
-        }
-
-        _watchdogCancelEvent?.Dispose();
-        _watchdogCancelEvent = null;
-
-        try
-        {
-            var exePath = Environment.ProcessPath;
-            if (string.IsNullOrWhiteSpace(exePath) || !File.Exists(exePath))
-                return;
-
-            // Avoid launching watchdog if hosted inside an external runner such as dotnet.exe
-            var exeName = Path.GetFileNameWithoutExtension(exePath);
-            if (string.Equals(exeName, "dotnet", StringComparison.OrdinalIgnoreCase))
-                return;
-
-            var cancelEventName = $"Local\\DeskGrid_TaskbarWatchdog_Cancel_{Environment.ProcessId}_{Guid.NewGuid():N}";
-            var cancelEvent = new EventWaitHandle(false, EventResetMode.ManualReset, cancelEventName);
-
-            var psi = new ProcessStartInfo
-            {
-                FileName = exePath,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-                WindowStyle = ProcessWindowStyle.Hidden
-            };
-
-            foreach (var arg in TaskbarWatchdogProtocol.BuildArgs(Environment.ProcessId, _configDirectory, cancelEventName))
-                psi.ArgumentList.Add(arg);
-
-            var proc = Process.Start(psi);
-            if (proc is null)
-            {
-                cancelEvent.Dispose();
-                return;
-            }
-
-            _watchdogCancelEvent = cancelEvent;
-            _watchdogProcess = proc;
-        }
-        catch
-        {
-            // Best-effort watchdog startup; durable taskbar_hidden.flag still provides fallback recovery
-            _watchdogCancelEvent?.Dispose();
-            _watchdogCancelEvent = null;
-            _watchdogProcess?.Dispose();
-            _watchdogProcess = null;
-        }
-    }
-
-    private void StopWatchdogLocked()
-    {
-        try
-        {
-            _watchdogCancelEvent?.Set();
-        }
-        catch
-        {
-            // Ignore
-        }
-
-        if (_watchdogProcess is not null)
-        {
-            try
-            {
-                if (!_watchdogProcess.HasExited)
-                {
-                    if (!_watchdogProcess.WaitForExit(250))
-                        _watchdogProcess.Kill(entireProcessTree: false);
-                }
-            }
-            catch
-            {
-                // Ignore if already exited
-            }
-            finally
-            {
-                _watchdogProcess.Dispose();
-                _watchdogProcess = null;
-            }
-        }
-
-        _watchdogCancelEvent?.Dispose();
-        _watchdogCancelEvent = null;
     }
 
     private void StartEnforceTimerLocked()
@@ -398,6 +257,13 @@ public sealed class TaskbarService : ITaskbarService
     {
         try
         {
+            // Asynchronous non-blocking notification tells Explorer's taskbar/shell immediately to refresh TraySettings
+            NativeMethods.SendNotifyMessage(
+                NativeMethods.HWND_BROADCAST,
+                NativeMethods.WM_SETTINGCHANGE,
+                0,
+                "TraySettings");
+
             // Non-blocking broadcast (SMTO_ABORTIFHUNG) notifies desktop shell and top-level apps
             // to refresh their working area without ever hanging on unresponsive windows.
             NativeMethods.SendMessageTimeout(
@@ -454,7 +320,7 @@ public sealed class TaskbarService : ITaskbarService
             if (!string.IsNullOrEmpty(dir))
                 Directory.CreateDirectory(dir);
 
-            var payload = TaskbarWatchdogProtocol.FormatSentinel(DateTime.UtcNow, originalAppBarState, Environment.ProcessId);
+            var payload = $"{DateTime.UtcNow:O}|{originalAppBarState.ToString(CultureInfo.InvariantCulture)}";
             var bytes = Encoding.UTF8.GetBytes(payload);
             using var fs = new FileStream(
                 _sentinelFilePath,
@@ -481,9 +347,13 @@ public sealed class TaskbarService : ITaskbarService
                 if (!File.Exists(path))
                     continue;
 
-                var content = File.ReadAllText(path);
-                if (TaskbarWatchdogProtocol.TryParseSentinelOriginalState(content, out var state))
+                var content = File.ReadAllText(path).Trim();
+                var parts = content.Split('|');
+                if (parts.Length >= 2 &&
+                    int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var state))
+                {
                     return state;
+                }
             }
             catch
             {

@@ -67,18 +67,26 @@
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource DgSettingsNavHoverBackgroundBrush}"/>
-                                <Setter Property="Foreground" Value="{DynamicResource DgSettingsNavHoverForegroundBrush}"/>
+                                <Setter TargetName="ContentSite" Property="TextElement.Foreground" Value="{DynamicResource DgSettingsNavHoverForegroundBrush}"/>
                             </Trigger>
                             <Trigger Property="IsChecked" Value="True">
                                 <Setter TargetName="Bd" Property="Background" Value="{DynamicResource DgSettingsNavSelectedBackgroundBrush}"/>
                                 <Setter TargetName="ActivePill" Property="Visibility" Value="Visible"/>
-                                <Setter Property="Foreground" Value="{DynamicResource DgSettingsNavSelectedForegroundBrush}"/>
-                                <Setter Property="FontWeight" Value="SemiBold"/>
+                                <Setter TargetName="ContentSite" Property="TextElement.Foreground" Value="{DynamicResource DgSettingsNavSelectedForegroundBrush}"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+            <Style.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource DgSettingsNavHoverForegroundBrush}"/>
+                </Trigger>
+                <Trigger Property="IsChecked" Value="True">
+                    <Setter Property="Foreground" Value="{DynamicResource DgSettingsNavSelectedForegroundBrush}"/>
+                    <Setter Property="FontWeight" Value="SemiBold"/>
+                </Trigger>
+            </Style.Triggers>
         </Style>
 
         <Style x:Key="DgSettingsSafeExitButtonStyle" TargetType="Button">
@@ -337,7 +345,7 @@
                             <TextBlock Text="防打扰与任务栏协同" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
 
                             <CheckBox x:Name="FullscreenHideCheck" Content="检测到全屏游戏或全屏视频时自动静默隐藏 Dock" Margin="0,4,0,8" Checked="OnSettingChanged" Unchecked="OnSettingChanged"/>
-                            <CheckBox x:Name="HideTaskbarCheck" Content="自动隐藏 Windows 原生任务栏（安全机制：退出或异常终止均自动恢复）" Margin="0,4,0,6" Checked="OnSettingChanged" Unchecked="OnSettingChanged"/>
+                            <CheckBox x:Name="HideTaskbarCheck" Content="自动隐藏 Windows 原生任务栏（安全退出或重启后自动恢复）" Margin="0,4,0,6" Checked="OnSettingChanged" Unchecked="OnSettingChanged"/>
                             <TextBlock x:Name="TaskbarUncheckedHintText"
                                        Text="提示：未开启隐藏原生任务栏时，Dock 会自动悬浮在原生任务栏上方，互不遮挡。"
                                        FontSize="12"
@@ -345,7 +353,7 @@
                                        TextWrapping="Wrap"
                                        Margin="24,0,0,4"/>
                             <TextBlock x:Name="TaskbarCheckedHintText"
-                                       Text="已开启原生任务栏隐藏，退出 DeskGrid 或异常终止时将自动恢复；也可随时点击 Dock 齿轮菜单恢复。"
+                                       Text="已开启原生任务栏隐藏，通过系统托盘或左下角「安全退出」关闭时将自动恢复；也可随时点击 Dock 齿轮菜单恢复。"
                                        FontSize="12"
                                        Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
                                        TextWrapping="Wrap"

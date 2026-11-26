@@ -77,6 +77,9 @@ public partial class SettingsWindow : Window
 
         EnsureConfigSections();
         var themePref = _config.Appearance.Theme;
+        if (Application.Current is not null)
+            ThemePalette.ApplyToApplication(Application.Current, themePref);
+
         var targetThemeMode = ThemePalette.ToWpfThemeMode(themePref);
         if (ThemeMode != targetThemeMode)
             ThemeMode = targetThemeMode;
