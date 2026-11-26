@@ -68,7 +68,10 @@ internal static class NativeMethods
     public const int WH_MOUSE_LL = 14;
     public const uint GW_OWNER = 4;
     public const uint GA_ROOT = 2;
+    public const uint MONITOR_DEFAULTTONULL = 0;
+    public const uint MONITOR_DEFAULTTOPRIMARY = 1;
     public const uint MONITOR_DEFAULTTONEAREST = 2;
+    public const int MDT_EFFECTIVE_DPI = 0;
 
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
     public const uint EVENT_SYSTEM_MINIMIZESTART = 0x0016;
@@ -411,9 +414,15 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     public static extern nint MonitorFromWindow(nint hwnd, uint dwFlags);
 
+    [DllImport("user32.dll")]
+    public static extern nint MonitorFromPoint(POINT pt, uint dwFlags);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetMonitorInfo(nint hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("shcore.dll")]
+    public static extern int GetDpiForMonitor(nint hmonitor, int dpiType, out uint dpiX, out uint dpiY);
 
     [DllImport("user32.dll")]
     public static extern nint SetWinEventHook(

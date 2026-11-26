@@ -1,0 +1,13 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
+
+    <!-- Dock 栏设置项（简体中文） -->
+    <sys:String x:Key="StrSettingsDockMultiMonitorLabel">多显示器显示模式</sys:String>
+    <sys:String x:Key="StrSettingsDockMultiMonitorPrimaryOnly">仅主显示器</sys:String>
+    <sys:String x:Key="StrSettingsDockMultiMonitorAllMonitors">所有显示器</sys:String>
+    <sys:String x:Key="StrSettingsDockMultiMonitorFollowMouse">跟随鼠标所在屏幕</sys:String>
+    <sys:String x:Key="StrSettingsDockScaleLabel">Dock 栏尺寸大小</sys:String>
+    <sys:String x:Key="StrSettingsDockRevealOnBottomEdge">全屏隐藏时，鼠标滑到屏幕最底部临时显示 Dock 栏</sys:String>
+
+</ResourceDictionary>

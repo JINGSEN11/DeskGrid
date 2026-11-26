@@ -69,14 +69,33 @@ public sealed class BehaviorSettings
     public bool BoxesVisible { get; set; } = true;
 }
 
+public static class DockMultiMonitorModes
+{
+    public const string PrimaryOnly = "PrimaryOnly";
+    public const string AllMonitors = "AllMonitors";
+    public const string FollowMouse = "FollowMouse";
+
+    public static string Normalize(string? mode)
+    {
+        if (string.Equals(mode, AllMonitors, StringComparison.OrdinalIgnoreCase))
+            return AllMonitors;
+        if (string.Equals(mode, FollowMouse, StringComparison.OrdinalIgnoreCase))
+            return FollowMouse;
+        return PrimaryOnly;
+    }
+}
+
 public sealed class DockConfig
 {
     public bool Enabled { get; set; } = true;
+    public string MultiMonitorMode { get; set; } = DockMultiMonitorModes.PrimaryOnly;
+    public double DockScale { get; set; } = 1.00;
     public bool EnableMagnification { get; set; } = true;
     public double MagnificationScale { get; set; } = 1.42;
     public double MagnificationRadius { get; set; } = 130.0;
     public double BaseIconSize { get; set; } = 44.0;
     public bool AutoHideOnFullscreen { get; set; } = true;
+    public bool RevealDockOnBottomEdge { get; set; } = true;
     public bool AutoHideSystemTaskbar { get; set; } = false;
     public bool ShowDockClock { get; set; } = true;
     public bool ClockUse24Hour { get; set; } = true;

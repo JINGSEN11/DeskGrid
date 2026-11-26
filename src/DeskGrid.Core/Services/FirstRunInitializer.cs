@@ -46,11 +46,14 @@ public static class FirstRunInitializer
             Dock = new DockConfig
             {
                 Enabled = true,
+                MultiMonitorMode = DockMultiMonitorModes.PrimaryOnly,
+                DockScale = 1.00,
                 EnableMagnification = true,
                 MagnificationScale = 1.42,
                 MagnificationRadius = 130,
                 BaseIconSize = 44,
                 AutoHideOnFullscreen = true,
+                RevealDockOnBottomEdge = true,
                 AutoHideSystemTaskbar = false,
                 ShowDockClock = true,
                 ClockUse24Hour = true,

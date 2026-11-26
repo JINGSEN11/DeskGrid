@@ -8,12 +8,14 @@ using DeskGrid.App.Views;
 using DeskGrid.Core.Models;
 using DeskGrid.Core.Services;
 using DeskGrid.Win32.Services;
+using Microsoft.Win32;
 
 namespace DeskGrid.App;
 
 public partial class App : Application
 {
     private const string SingleInstanceMutexName = "Local\\DeskGrid_SingleInstance_Mutex_v1";
+    private const int FollowMouseSwitchDwellMs = 150;
 
     private Mutex? _singleInstanceMutex;
     private ConfigService _configService = null!;
@@ -31,8 +33,14 @@ public partial class App : Application
     private TrayIconController? _trayController;
 
     private readonly Dictionary<string, DesktopBoxWindow> _boxWindows = new(StringComparer.Ordinal);
-    private DockWindow? _dockWindow;
+    private readonly List<DockWindow> _dockWindows = [];
     private SettingsWindow? _settingsWindow;
+
+    private DispatcherTimer? _followMouseTimer;
+    private DispatcherTimer? _edgeRevealTimer;
+    private string? _pendingFollowMonitorDevice;
+    private long _pendingFollowSinceMs;
+    private bool _displaySettingsSubscribed;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -81,20 +89,12 @@ public partial class App : Application
                 win.RefreshItems();
         });
 
-        _dockManager.DockChanged += (_, _) => Dispatcher.Invoke(() => _dockWindow?.RefreshDock());
+        _dockManager.DockChanged += (_, _) => Dispatcher.Invoke(RefreshAllDocks);
 
-        _windowTracker.WindowsChanged += (_, _) => Dispatcher.BeginInvoke(() => _dockWindow?.RefreshDock());
+        _windowTracker.WindowsChanged += (_, _) => Dispatcher.BeginInvoke(RefreshAllDocks);
         _windowTracker.Start();
 
-        _fullscreenMonitor.FullscreenStateChanged += (_, isFs) => Dispatcher.BeginInvoke(() =>
-        {
-            if (!_config.ShowDock)
-            {
-                _dockWindow?.HideDock();
-                return;
-            }
-            _dockWindow?.SetFullscreenHidden(isFs);
-        });
+        _fullscreenMonitor.FullscreenMonitorsChanged += (_, _) => Dispatcher.BeginInvoke(SyncFullscreenStateToDocks);
         _fullscreenMonitor.Start();
 
         _desktopHost.EmptyDesktopDoubleClicked += (_, _) => Dispatcher.Invoke(() =>
@@ -104,25 +104,30 @@ public partial class App : Application
         });
         _desktopHost.StartEmptyDesktopDoubleClickMonitor(Dispatcher);
 
+        if (!_displaySettingsSubscribed)
+        {
+            SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
+            _displaySettingsSubscribed = true;
+        }
+
+        _followMouseTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(120)
+        };
+        _followMouseTimer.Tick += (_, _) => OnFollowMouseTick();
+
+        _edgeRevealTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(40)
+        };
+        _edgeRevealTimer.Tick += (_, _) => OnEdgeRevealTick();
+
         // Spawn all boxes
         foreach (var box in _config.Boxes)
             SpawnBoxWindow(box);
 
-        // Spawn Dock
-        _dockWindow = new DockWindow(
-            _config,
-            _dockManager,
-            _windowTracker,
-            _nativeIcons,
-            _shellService,
-            ToggleAllBoxesVisibility,
-            OpenCreateBoxDialog,
-            ShowSettingsWindow,
-            ShowSystemTaskbarAndDisableAutoHide,
-            ShutdownSafely);
-
-        if (_config.ShowDock)
-            _dockWindow.Show();
+        // Spawn Dock instance(s) according to MultiMonitorMode
+        RebuildDockWindows();
 
         // Spawn System Tray
         _trayController ??= new TrayIconController(
@@ -135,7 +140,7 @@ public partial class App : Application
             () =>
             {
                 _nativeIcons.ToggleIcons();
-                _dockWindow?.UpdateQuickToolStates();
+                UpdateAllDockQuickToolStates();
             },
             EmergencyRestoreSystemState,
             ShowSettingsWindow,
@@ -192,7 +197,315 @@ public partial class App : Application
                 win.Hide();
         }
 
-        _dockWindow?.UpdateQuickToolStates();
+        UpdateAllDockQuickToolStates();
+    }
+
+    private void OnDisplaySettingsChanged(object? sender, EventArgs e)
+    {
+        Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+        {
+            if (_config is null)
+                return;
+
+            RebuildDockWindows();
+        });
+    }
+
+    private DockWindow CreateDockWindow(DisplayMonitorInfo monitor)
+    {
+        return new DockWindow(
+            _config,
+            _dockManager,
+            _windowTracker,
+            _nativeIcons,
+            _shellService,
+            ToggleAllBoxesVisibility,
+            OpenCreateBoxDialog,
+            ShowSettingsWindow,
+            ShowSystemTaskbarAndDisableAutoHide,
+            ShutdownSafely,
+            monitor);
+    }
+
+    private void CloseAndClearAllDockWindows()
+    {
+        _followMouseTimer?.Stop();
+        _edgeRevealTimer?.Stop();
+        _pendingFollowMonitorDevice = null;
+
+        foreach (var dock in _dockWindows.ToList())
+        {
+            try
+            {
+                dock.HideDock();
+                if (!dock.IsClosed)
+                    dock.Close();
+            }
+            catch
+            {
+                // Ignore window teardown exceptions
+            }
+        }
+
+        _dockWindows.Clear();
+    }
+
+    private void RebuildDockWindows()
+    {
+        if (!_config.ShowDock || !_config.Dock.Enabled)
+        {
+            CloseAndClearAllDockWindows();
+            return;
+        }
+
+        var allMonitors = DisplayMonitorService.GetAllMonitors();
+        int? cursorX = null;
+        int? cursorY = null;
+        if (DesktopHostService.TryGetCursorScreenPosition(out var cx, out var cy))
+        {
+            cursorX = cx;
+            cursorY = cy;
+        }
+
+        var mode = DockMultiMonitorModes.Normalize(_config.Dock.MultiMonitorMode);
+        var targetMonitors = DockPositionCalculator.SelectTargetMonitors(allMonitors, mode, cursorX, cursorY);
+
+        var nextDocks = new List<DockWindow>(targetMonitors.Count);
+        var reusable = _dockWindows.Where(d => !d.IsClosed).ToList();
+
+        if (mode == DockMultiMonitorModes.AllMonitors)
+        {
+            foreach (var monitor in targetMonitors)
+            {
+                var match = reusable.FirstOrDefault(d =>
+                    string.Equals(d.TargetMonitor.DeviceName, monitor.DeviceName, StringComparison.OrdinalIgnoreCase) ||
+                    (monitor.Handle != 0 && d.TargetMonitor.Handle == monitor.Handle));
+
+                if (match is not null)
+                {
+                    reusable.Remove(match);
+                    match.SetTargetMonitor(monitor, smoothTransition: false);
+                    nextDocks.Add(match);
+                }
+                else
+                {
+                    nextDocks.Add(CreateDockWindow(monitor));
+                }
+            }
+        }
+        else if (targetMonitors.Count > 0)
+        {
+            var target = targetMonitors[0];
+            if (reusable.Count > 0)
+            {
+                var primaryDock = reusable[0];
+                reusable.RemoveAt(0);
+                primaryDock.SetTargetMonitor(target, smoothTransition: false);
+                nextDocks.Add(primaryDock);
+            }
+            else
+            {
+                nextDocks.Add(CreateDockWindow(target));
+            }
+        }
+
+        // Safely close any excess / unplugged-monitor DockWindow instances to prevent leaks
+        foreach (var stale in reusable)
+        {
+            try
+            {
+                stale.HideDock();
+                if (!stale.IsClosed)
+                    stale.Close();
+            }
+            catch
+            {
+                // Ignore teardown errors
+            }
+        }
+
+        _dockWindows.Clear();
+        _dockWindows.AddRange(nextDocks);
+
+        foreach (var dock in _dockWindows)
+        {
+            var isFs = _fullscreenMonitor.IsMonitorFullscreen(dock.TargetMonitor.Handle);
+            dock.SetFullscreenHidden(isFs);
+            if (!dock.IsVisible && !(isFs && _config.Dock.AutoHideOnFullscreen))
+                dock.Show();
+
+            dock.ApplySettings();
+            dock.RefreshDock();
+            dock.RepositionDock();
+        }
+
+        UpdateDockMonitorTimers();
+    }
+
+    private void UpdateDockMonitorTimers()
+    {
+        var mode = DockMultiMonitorModes.Normalize(_config.Dock.MultiMonitorMode);
+        var shouldFollowMouse = _config.ShowDock &&
+                                _config.Dock.Enabled &&
+                                mode == DockMultiMonitorModes.FollowMouse &&
+                                _dockWindows.Count > 0;
+        if (shouldFollowMouse)
+        {
+            if (_followMouseTimer is not null && !_followMouseTimer.IsEnabled)
+                _followMouseTimer.Start();
+        }
+        else
+        {
+            _followMouseTimer?.Stop();
+            _pendingFollowMonitorDevice = null;
+        }
+
+        var shouldPollEdgeReveal = _config.ShowDock &&
+                                   _config.Dock.Enabled &&
+                                   _config.Dock.AutoHideOnFullscreen &&
+                                   _config.Dock.RevealDockOnBottomEdge &&
+                                   _dockWindows.Any(d => !d.IsClosed && (d.IsFullscreenHidden || d.IsTemporarilyRevealed));
+        if (shouldPollEdgeReveal)
+        {
+            if (_edgeRevealTimer is not null && !_edgeRevealTimer.IsEnabled)
+                _edgeRevealTimer.Start();
+        }
+        else
+        {
+            _edgeRevealTimer?.Stop();
+        }
+    }
+
+    private void SyncFullscreenStateToDocks()
+    {
+        if (!_config.ShowDock || !_config.Dock.Enabled)
+        {
+            foreach (var dock in _dockWindows)
+                dock.HideDock();
+            UpdateDockMonitorTimers();
+            return;
+        }
+
+        foreach (var dock in _dockWindows)
+        {
+            if (dock.IsClosed)
+                continue;
+
+            var isMonitorFullscreen = _fullscreenMonitor.IsMonitorFullscreen(dock.TargetMonitor.Handle);
+            dock.SetFullscreenHidden(isMonitorFullscreen);
+        }
+
+        UpdateDockMonitorTimers();
+    }
+
+    private void OnFollowMouseTick()
+    {
+        if (!_config.ShowDock || !_config.Dock.Enabled || _dockWindows.Count == 0)
+            return;
+
+        if (DockMultiMonitorModes.Normalize(_config.Dock.MultiMonitorMode) != DockMultiMonitorModes.FollowMouse)
+            return;
+
+        var dock = _dockWindows[0];
+        if (dock.IsClosed || dock.HasActiveOverlay)
+        {
+            _pendingFollowMonitorDevice = null;
+            return;
+        }
+
+        if (!DesktopHostService.TryGetCursorScreenPosition(out var cursorX, out var cursorY))
+            return;
+
+        var monitors = DisplayMonitorService.GetAllMonitors();
+        var cursorMonitor = DockPositionCalculator.FindMonitorForPoint(monitors, cursorX, cursorY);
+        if (cursorMonitor is null)
+            return;
+
+        var sameAsCurrent =
+            string.Equals(cursorMonitor.DeviceName, dock.TargetMonitor.DeviceName, StringComparison.OrdinalIgnoreCase) &&
+            (cursorMonitor.Handle == 0 || cursorMonitor.Handle == dock.TargetMonitor.Handle);
+
+        if (sameAsCurrent)
+        {
+            _pendingFollowMonitorDevice = null;
+            return;
+        }
+
+        var nowMs = Environment.TickCount64;
+        if (!string.Equals(_pendingFollowMonitorDevice, cursorMonitor.DeviceName, StringComparison.OrdinalIgnoreCase))
+        {
+            _pendingFollowMonitorDevice = cursorMonitor.DeviceName;
+            _pendingFollowSinceMs = nowMs;
+            return;
+        }
+
+        if (nowMs - _pendingFollowSinceMs < FollowMouseSwitchDwellMs)
+            return;
+
+        _pendingFollowMonitorDevice = null;
+        dock.SetTargetMonitor(cursorMonitor, smoothTransition: true);
+        var isFs = _fullscreenMonitor.IsMonitorFullscreen(cursorMonitor.Handle);
+        dock.SetFullscreenHidden(isFs);
+        UpdateDockMonitorTimers();
+    }
+
+    private void OnEdgeRevealTick()
+    {
+        if (!_config.ShowDock || !_config.Dock.Enabled ||
+            !_config.Dock.AutoHideOnFullscreen || !_config.Dock.RevealDockOnBottomEdge)
+        {
+            _edgeRevealTimer?.Stop();
+            return;
+        }
+
+        if (!DesktopHostService.TryGetCursorScreenPosition(out var cursorX, out var cursorY))
+            return;
+
+        var nowMs = Environment.TickCount64;
+        var anyNeedsPolling = false;
+
+        foreach (var dock in _dockWindows)
+        {
+            if (dock.IsClosed)
+                continue;
+
+            if (dock.IsFullscreenHidden || dock.IsTemporarilyRevealed)
+            {
+                dock.UpdateEdgeRevealTick(cursorX, cursorY, nowMs);
+                if (dock.IsFullscreenHidden || dock.IsTemporarilyRevealed)
+                    anyNeedsPolling = true;
+            }
+        }
+
+        if (!anyNeedsPolling)
+            _edgeRevealTimer?.Stop();
+    }
+
+    private void RefreshAllDocks()
+    {
+        foreach (var dock in _dockWindows)
+        {
+            if (!dock.IsClosed)
+                dock.RefreshDock();
+        }
+    }
+
+    private void UpdateAllDockQuickToolStates()
+    {
+        foreach (var dock in _dockWindows)
+        {
+            if (!dock.IsClosed)
+                dock.UpdateQuickToolStates();
+        }
+    }
+
+    private void RepositionAllDocks()
+    {
+        foreach (var dock in _dockWindows)
+        {
+            if (!dock.IsClosed)
+                dock.RepositionDock();
+        }
     }
 
     private void ToggleDockVisibility()
@@ -226,11 +539,11 @@ public partial class App : Application
 
         if (_config.ShowDock)
         {
-            _dockWindow?.RepositionDock();
+            RepositionAllDocks();
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
             {
                 if (_config.ShowDock)
-                    _dockWindow?.RepositionDock();
+                    RepositionAllDocks();
             });
         }
 
@@ -281,6 +594,7 @@ public partial class App : Application
                 _configService,
                 ApplyAllSettingsLive,
                 ApplyGlobalBoxOpacityLive,
+                ApplyDockScaleLive,
                 ApplyDockMagnificationScaleLive,
                 ReplaceConfigAndReload,
                 EmergencyRestoreSystemState,
@@ -411,11 +725,26 @@ public partial class App : Application
             win.ApplyOpacity(clamped);
     }
 
+    private void ApplyDockScaleLive(double scale)
+    {
+        var clamped = DockLayoutMetrics.ClampScale(scale);
+        _config.Dock.DockScale = clamped;
+        foreach (var dock in _dockWindows)
+        {
+            if (!dock.IsClosed)
+                dock.ApplyDockScale(clamped);
+        }
+    }
+
     private void ApplyDockMagnificationScaleLive(double scale)
     {
         var clamped = Math.Clamp(scale, 1.05, 2.0);
         _config.Dock.MagnificationScale = clamped;
-        _dockWindow?.ApplyMagnificationScale(clamped);
+        foreach (var dock in _dockWindows)
+        {
+            if (!dock.IsClosed)
+                dock.ApplyMagnificationScale(clamped);
+        }
     }
 
     private void ApplyAllSettingsLive()
@@ -427,21 +756,7 @@ public partial class App : Application
         foreach (var win in _boxWindows.Values)
             win.ApplyVisualSettings();
 
-        if (_dockWindow is not null)
-        {
-            if (_config.ShowDock)
-            {
-                if (!_dockWindow.IsVisible && !(_fullscreenMonitor.IsFullscreenActive && _config.Dock.AutoHideOnFullscreen))
-                    _dockWindow.Show();
-                _dockWindow.ApplySettings();
-                _dockWindow.RefreshDock();
-            }
-            else
-            {
-                _dockWindow.HideDock();
-            }
-        }
-
+        RebuildDockWindows();
         ApplySystemSettings();
     }
 
@@ -461,11 +776,11 @@ public partial class App : Application
         _taskbarService.SetTaskbarHidden(_config.ShowDock && _config.Dock.AutoHideSystemTaskbar);
         if (_config.ShowDock)
         {
-            _dockWindow?.RepositionDock();
+            RepositionAllDocks();
             Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
             {
                 if (_config.ShowDock)
-                    _dockWindow?.RepositionDock();
+                    RepositionAllDocks();
             });
         }
     }
@@ -476,8 +791,7 @@ public partial class App : Application
             win.Close();
         _boxWindows.Clear();
 
-        _dockWindow?.Close();
-        _dockWindow = null;
+        CloseAndClearAllDockWindows();
 
         _boxManager.Dispose();
 
@@ -494,26 +808,12 @@ public partial class App : Application
             if (_boxWindows.TryGetValue(boxId, out var win))
                 win.RefreshItems();
         });
-        _dockManager.DockChanged += (_, _) => Dispatcher.Invoke(() => _dockWindow?.RefreshDock());
+        _dockManager.DockChanged += (_, _) => Dispatcher.Invoke(RefreshAllDocks);
 
         foreach (var box in _config.Boxes)
             SpawnBoxWindow(box);
 
-        _dockWindow = new DockWindow(
-            _config,
-            _dockManager,
-            _windowTracker,
-            _nativeIcons,
-            _shellService,
-            ToggleAllBoxesVisibility,
-            OpenCreateBoxDialog,
-            ShowSettingsWindow,
-            ShowSystemTaskbarAndDisableAutoHide,
-            ShutdownSafely);
-
-        if (_config.ShowDock)
-            _dockWindow.Show();
-
+        RebuildDockWindows();
         ApplySystemSettings();
     }
 
@@ -521,8 +821,8 @@ public partial class App : Application
     {
         _taskbarService.RestoreTaskbar();
         _nativeIcons.SetIconsVisible(true);
-        _dockWindow?.UpdateQuickToolStates();
-        _dockWindow?.RepositionDock();
+        UpdateAllDockQuickToolStates();
+        RepositionAllDocks();
     }
 
     private void SafeRestoreSystemState()
@@ -540,6 +840,12 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         SafeRestoreSystemState();
+        if (_displaySettingsSubscribed)
+        {
+            SystemEvents.DisplaySettingsChanged -= OnDisplaySettingsChanged;
+            _displaySettingsSubscribed = false;
+        }
+        CloseAndClearAllDockWindows();
         _trayController?.Dispose();
         _desktopHost.Dispose();
         _fullscreenMonitor.Dispose();

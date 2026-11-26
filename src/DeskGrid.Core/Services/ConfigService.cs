@@ -233,6 +233,8 @@ public sealed class ConfigService
 
         config.Appearance.DefaultBoxOpacity = Math.Clamp(config.Appearance.DefaultBoxOpacity, 0.15, 0.90);
         config.Behavior.GridSnapStep = Math.Clamp(config.Behavior.GridSnapStep, 4, 48);
+        config.Dock.MultiMonitorMode = DockMultiMonitorModes.Normalize(config.Dock.MultiMonitorMode);
+        config.Dock.DockScale = DockLayoutMetrics.ClampScale(config.Dock.DockScale);
         config.Dock.BaseIconSize = Math.Clamp(config.Dock.BaseIconSize, 32, 64);
         config.Dock.MagnificationScale = Math.Clamp(config.Dock.MagnificationScale, 1.0, 1.8);
         config.Dock.MagnificationRadius = Math.Clamp(config.Dock.MagnificationRadius, 60, 260);

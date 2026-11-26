@@ -1,0 +1,13 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                    xmlns:sys="clr-namespace:System;assembly=mscorlib">
+
+    <!-- Dock Settings (English) -->
+    <sys:String x:Key="StrSettingsDockMultiMonitorLabel">Multi-Monitor Display Mode</sys:String>
+    <sys:String x:Key="StrSettingsDockMultiMonitorPrimaryOnly">Primary Display Only</sys:String>
+    <sys:String x:Key="StrSettingsDockMultiMonitorAllMonitors">All Displays</sys:String>
+    <sys:String x:Key="StrSettingsDockMultiMonitorFollowMouse">Follow Mouse Display</sys:String>
+    <sys:String x:Key="StrSettingsDockScaleLabel">Dock Size Scale</sys:String>
+    <sys:String x:Key="StrSettingsDockRevealOnBottomEdge">Temporarily reveal Dock at the bottom screen edge while hidden in fullscreen</sys:String>
+
+</ResourceDictionary>

@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using DeskGrid.App.Controls;
 using DeskGrid.App.Helpers;
@@ -31,6 +32,14 @@ public partial class DockWindow : Window
     private readonly Action _onSafeExit;
 
     private readonly DispatcherTimer _clockTimer;
+    private readonly DockEdgeRevealStateMachine _edgeRevealStateMachine = new();
+    private DisplayMonitorInfo _targetMonitor;
+    private DockLayoutMetrics _layoutMetrics;
+    private bool _isFullscreenOnMonitor;
+    private bool _baselineTopmost = true;
+    private bool _isClosed;
+    private int _fadeAnimationGeneration;
+
     private string _lastClockTimeText = string.Empty;
     private string _lastClockDateText = string.Empty;
     private string _lastClockTooltipText = string.Empty;
@@ -45,6 +54,16 @@ public partial class DockWindow : Window
     private int _dragSourcePinnedIndex = -1;
     private bool _reorderCommittedDuringDrag;
 
+    public DisplayMonitorInfo TargetMonitor => _targetMonitor;
+    public bool IsClosed => _isClosed;
+    public bool IsFullscreenHidden => _isFullscreenOnMonitor && _appConfig.Dock.AutoHideOnFullscreen;
+    public bool IsTemporarilyRevealed => _edgeRevealStateMachine.State == DockEdgeRevealVisualState.TemporarilyRevealed;
+    public bool HasActiveOverlay =>
+        PowerMenuPopup.IsOpen ||
+        (_activeContextMenu is { IsOpen: true }) ||
+        (_activePopup is { IsLoaded: true, IsVisible: true }) ||
+        _isDragging;
+
     public DockWindow(
         AppConfig appConfig,
         DockManager dockManager,
@@ -55,7 +74,8 @@ public partial class DockWindow : Window
         Action onCreateBox,
         Action onOpenSettings,
         Action onShowSystemTaskbar,
-        Action onSafeExit)
+        Action onSafeExit,
+        DisplayMonitorInfo? targetMonitor = null)
     {
         InitializeComponent();
 
@@ -69,6 +89,12 @@ public partial class DockWindow : Window
         _onOpenSettings = onOpenSettings;
         _onShowSystemTaskbar = onShowSystemTaskbar;
         _onSafeExit = onSafeExit;
+        _targetMonitor = targetMonitor ?? DisplayMonitorService.GetPrimaryMonitor();
+        _baselineTopmost = Topmost;
+        WindowStartupLocation = WindowStartupLocation.Manual;
+
+        _layoutMetrics = ComputeCurrentLayoutMetrics();
+        ApplyLayoutMetricsToChrome(_layoutMetrics);
 
         _clockTimer = new DispatcherTimer
         {
@@ -76,7 +102,11 @@ public partial class DockWindow : Window
         };
         _clockTimer.Tick += (_, _) => UpdateClockDisplay(force: false);
 
-        SourceInitialized += (_, _) => DesktopHostService.ConfigureFloatingDockWindow(this);
+        SourceInitialized += (_, _) =>
+        {
+            DesktopHostService.ConfigureFloatingDockWindow(this);
+            RepositionDock();
+        };
         Loaded += (_, _) =>
         {
             ApplySettings();
@@ -85,7 +115,44 @@ public partial class DockWindow : Window
         };
         ContentRendered += (_, _) => RepositionDock();
         SizeChanged += (_, _) => RepositionDock();
-        Closed += (_, _) => _clockTimer.Stop();
+        Closed += (_, _) =>
+        {
+            _isClosed = true;
+            _clockTimer.Stop();
+            PowerMenuPopup.IsOpen = false;
+            CloseActiveContextMenu();
+            try { _activePopup?.Close(); } catch { }
+            _activePopup = null;
+        };
+    }
+
+    public void SetTargetMonitor(DisplayMonitorInfo monitor, bool smoothTransition = false)
+    {
+        ArgumentNullException.ThrowIfNull(monitor);
+
+        var monitorChanged =
+            _targetMonitor.Handle != monitor.Handle ||
+            !string.Equals(_targetMonitor.DeviceName, monitor.DeviceName, StringComparison.OrdinalIgnoreCase) ||
+            _targetMonitor.BoundsPx != monitor.BoundsPx ||
+            _targetMonitor.WorkingAreaPx != monitor.WorkingAreaPx ||
+            Math.Abs(_targetMonitor.SafeDpiScaleX - monitor.SafeDpiScaleX) > 0.01 ||
+            Math.Abs(_targetMonitor.SafeDpiScaleY - monitor.SafeDpiScaleY) > 0.01;
+
+        _targetMonitor = monitor;
+        if (!monitorChanged)
+            return;
+
+        RepositionDock();
+
+        if (smoothTransition && IsVisible && !IsFullscreenHidden)
+        {
+            _fadeAnimationGeneration++;
+            var anim = new DoubleAnimation(0.80, 1.0, TimeSpan.FromMilliseconds(120))
+            {
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            BeginAnimation(OpacityProperty, anim);
+        }
     }
 
     protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
@@ -98,20 +165,56 @@ public partial class DockWindow : Window
         }
     }
 
+    private DockLayoutMetrics ComputeCurrentLayoutMetrics(double? overrideDockScale = null, double? overrideMaxMagScale = null)
+    {
+        return DockLayoutMetrics.Calculate(
+            dockScale: overrideDockScale ?? _appConfig.Dock.DockScale,
+            maxMagnificationScale: overrideMaxMagScale ?? _appConfig.Dock.MagnificationScale,
+            enableMagnification: _appConfig.Dock.EnableMagnification,
+            baseMagnificationRadius: _appConfig.Dock.MagnificationRadius);
+    }
+
+    public void ApplyDockScale(double dockScale)
+    {
+        var clamped = DockLayoutMetrics.ClampScale(dockScale);
+        _layoutMetrics = ComputeCurrentLayoutMetrics(overrideDockScale: clamped);
+
+        ApplyLayoutMetricsToChrome(_layoutMetrics);
+        PinnedPanel.DockScale = _layoutMetrics.Scale;
+        RunningPanel.DockScale = _layoutMetrics.Scale;
+
+        ApplyMetricsToPanelTiles(PinnedPanel, _layoutMetrics);
+        ApplyMetricsToPanelTiles(RunningPanel, _layoutMetrics);
+
+        RepositionDock();
+    }
+
     public void ApplyMagnificationScale(double scale)
     {
         var clamped = Math.Clamp(scale, 1.05, 2.0);
         PinnedPanel.MaxScale = clamped;
         RunningPanel.MaxScale = clamped;
+        _layoutMetrics = ComputeCurrentLayoutMetrics(overrideMaxMagScale: clamped);
+        DockRootGrid.Margin = new Thickness(
+            _layoutMetrics.SideBufferWidth,
+            _layoutMetrics.TopBufferHeight,
+            _layoutMetrics.SideBufferWidth,
+            _layoutMetrics.BottomBufferHeight);
+        RepositionDock();
     }
 
     public void ApplySettings()
     {
+        _layoutMetrics = ComputeCurrentLayoutMetrics();
+        ApplyLayoutMetricsToChrome(_layoutMetrics);
+
         PinnedPanel.EnableMagnification = _appConfig.Dock.EnableMagnification;
+        PinnedPanel.DockScale = _layoutMetrics.Scale;
         PinnedPanel.MaxScale = _appConfig.Dock.MagnificationScale;
         PinnedPanel.EffectRadius = _appConfig.Dock.MagnificationRadius;
 
         RunningPanel.EnableMagnification = _appConfig.Dock.EnableMagnification;
+        RunningPanel.DockScale = _layoutMetrics.Scale;
         RunningPanel.MaxScale = _appConfig.Dock.MagnificationScale;
         RunningPanel.EffectRadius = _appConfig.Dock.MagnificationRadius;
 
@@ -121,9 +224,99 @@ public partial class DockWindow : Window
             RunningPanel.SmoothResetScales();
         }
 
+        ApplyMetricsToPanelTiles(PinnedPanel, _layoutMetrics);
+        ApplyMetricsToPanelTiles(RunningPanel, _layoutMetrics);
+
         ApplyClockSettings();
         UpdateQuickToolStates();
+        if (IsFullscreenHidden && !_appConfig.Dock.RevealDockOnBottomEdge)
+        {
+            _edgeRevealStateMachine.Reset(isFullscreenHidden: true);
+            CancelFadeAnimation();
+            RestoreBaselineTopmost();
+            HideDock();
+        }
         RepositionDock();
+    }
+
+    private void ApplyLayoutMetricsToChrome(DockLayoutMetrics m)
+    {
+        DockRootGrid.Margin = new Thickness(m.SideBufferWidth, m.TopBufferHeight, m.SideBufferWidth, m.BottomBufferHeight);
+
+        var pillCorner = new CornerRadius(m.PillCornerRadius);
+        DockShadowBackdrop.CornerRadius = pillCorner;
+        DockPill.CornerRadius = pillCorner;
+        DockSheenBorder.CornerRadius = new CornerRadius(Math.Max(1.0, m.PillCornerRadius - 1.0));
+        DockContentPanel.Margin = new Thickness(m.PillPaddingHorizontal, m.PillPaddingVertical, m.PillPaddingHorizontal, m.PillPaddingVertical);
+
+        ApplyToolButtonMetrics(ToggleNativeIconsButton, m, isFirst: true);
+        ApplyToolButtonMetrics(ToggleBoxesButton, m, isFirst: false);
+        ApplyToolButtonMetrics(NewBoxButton, m, isFirst: false);
+        ApplyToolButtonMetrics(SettingsButton, m, isFirst: false);
+
+        var dividerMargin = new Thickness(m.DividerHorizontalMargin, 0, m.DividerHorizontalMargin, 0);
+        QuickToolsDivider.Height = m.DividerHeight;
+        QuickToolsDivider.Margin = dividerMargin;
+        RunningDivider.Height = m.DividerHeight;
+        RunningDivider.Margin = dividerMargin;
+        ClockDivider.Height = m.DividerHeight;
+        ClockDivider.Margin = dividerMargin;
+
+        DockClockButton.Padding = new Thickness(m.ClockPaddingHorizontal, m.ClockPaddingVertical, m.ClockPaddingHorizontal, m.ClockPaddingVertical);
+        DockClockButton.CornerRadius = new CornerRadius(m.ClockCornerRadius);
+        ClockTimeText.FontSize = m.ClockTimeFontSize;
+        ClockDateText.FontSize = m.ClockDateFontSize;
+    }
+
+    private static void ApplyToolButtonMetrics(Button button, DockLayoutMetrics m, bool isFirst)
+    {
+        button.Width = m.ToolButtonSize;
+        button.Height = m.ToolButtonSize;
+        button.FontSize = m.ToolButtonFontSize;
+        button.Margin = isFirst ? new Thickness(0) : new Thickness(m.ToolButtonSpacing, 0, 0, 0);
+    }
+
+    private void ApplyMetricsToPanelTiles(DockMagnifyingPanel panel, DockLayoutMetrics m)
+    {
+        foreach (var tile in panel.Children.OfType<Border>())
+        {
+            if (tile.Tag is DockSlotItem slot)
+                ApplyTileLayoutMetrics(tile, slot, m);
+        }
+    }
+
+    private void ApplyTileLayoutMetrics(Border tile, DockSlotItem slot, DockLayoutMetrics m)
+    {
+        tile.Width = m.TileWidth;
+        tile.Height = m.TileHeight;
+        tile.Margin = new Thickness(m.TileHorizontalMargin, 0, m.TileHorizontalMargin, 0);
+        tile.Padding = new Thickness(m.TilePaddingHorizontal, m.TilePaddingTop, m.TilePaddingHorizontal, m.TilePaddingBottom);
+        tile.CornerRadius = new CornerRadius(m.TileCornerRadius);
+
+        if (tile.Child is Grid grid && grid.RowDefinitions.Count >= 2)
+        {
+            grid.RowDefinitions[1].Height = new GridLength(m.IndicatorRowHeight);
+
+            if (grid.Children.Count >= 1 && grid.Children[0] is ContentControl iconHost)
+            {
+                if (iconHost.Content is Image img)
+                {
+                    img.Width = m.IconVisualSize;
+                    img.Height = m.IconVisualSize;
+                }
+                else if (iconHost.Content is TextBlock glyph)
+                {
+                    glyph.FontSize = Math.Round(m.IconSize * 0.56, 1);
+                }
+            }
+
+            if (grid.Children.Count >= 2 && grid.Children[1] is Border indicator)
+            {
+                indicator.Height = m.IndicatorHeight;
+                indicator.CornerRadius = new CornerRadius(Math.Round(m.IndicatorHeight * 0.55, 1));
+                ApplyIndicatorState(indicator, slot, m);
+            }
+        }
     }
 
     private void ApplyClockSettings()
@@ -197,6 +390,9 @@ public partial class DockWindow : Window
 
     public void RefreshDock(bool forceIconReload = false)
     {
+        if (_isClosed)
+            return;
+
         if (_isDragging)
         {
             _pendingRefreshAfterDrag = true;
@@ -205,10 +401,10 @@ public partial class DockWindow : Window
 
         var running = _windowTracker.GetRunningWindows();
         var snapshot = _dockManager.BuildSnapshot(running);
-        var iconSize = _appConfig.Dock.BaseIconSize;
+        var metrics = _layoutMetrics;
 
-        var pinnedChanged = SyncPanelSlots(PinnedPanel, snapshot.PinnedSlots, iconSize, forceIconReload);
-        var runningChanged = SyncPanelSlots(RunningPanel, snapshot.RunningOnlySlots, iconSize, forceIconReload);
+        var pinnedChanged = SyncPanelSlots(PinnedPanel, snapshot.PinnedSlots, metrics, forceIconReload);
+        var runningChanged = SyncPanelSlots(RunningPanel, snapshot.RunningOnlySlots, metrics, forceIconReload);
 
         var prevDividerVis = RunningDivider.Visibility;
         RunningDivider.Visibility = snapshot.RunningOnlySlots.Count > 0
@@ -223,10 +419,9 @@ public partial class DockWindow : Window
     private bool SyncPanelSlots(
         DockMagnifyingPanel panel,
         IReadOnlyList<DockSlotItem> slots,
-        double iconSize,
+        DockLayoutMetrics metrics,
         bool forceIconReload)
     {
-        var expectedWidth = iconSize + 12;
         var sameOrder = panel.Children.Count == slots.Count;
         if (sameOrder)
         {
@@ -234,8 +429,7 @@ public partial class DockWindow : Window
             {
                 if (panel.Children[i] is not Border tile ||
                     tile.Tag is not DockSlotItem prev ||
-                    !string.Equals(prev.Id, slots[i].Id, StringComparison.Ordinal) ||
-                    Math.Abs(tile.Width - expectedWidth) > 0.1)
+                    !string.Equals(prev.Id, slots[i].Id, StringComparison.Ordinal))
                 {
                     sameOrder = false;
                     break;
@@ -249,7 +443,7 @@ public partial class DockWindow : Window
             {
                 var tile = (Border)panel.Children[i];
                 var prev = (DockSlotItem)tile.Tag;
-                UpdateDockSlotElement(tile, prev, slots[i], iconSize, forceIconReload);
+                UpdateDockSlotElement(tile, prev, slots[i], metrics, forceIconReload);
             }
             return false;
         }
@@ -258,7 +452,7 @@ public partial class DockWindow : Window
         var existingById = new Dictionary<string, Border>(StringComparer.Ordinal);
         foreach (var child in panel.Children.OfType<Border>())
         {
-            if (child.Tag is DockSlotItem existingSlot && Math.Abs(child.Width - expectedWidth) <= 0.1)
+            if (child.Tag is DockSlotItem existingSlot)
                 existingById.TryAdd(existingSlot.Id, child);
         }
 
@@ -267,12 +461,12 @@ public partial class DockWindow : Window
         {
             if (existingById.TryGetValue(slot.Id, out var reusedTile) && reusedTile.Tag is DockSlotItem prevSlot)
             {
-                UpdateDockSlotElement(reusedTile, prevSlot, slot, iconSize, forceIconReload);
+                UpdateDockSlotElement(reusedTile, prevSlot, slot, metrics, forceIconReload);
                 panel.Children.Add(reusedTile);
             }
             else
             {
-                panel.Children.Add(BuildDockSlotElement(slot, iconSize));
+                panel.Children.Add(BuildDockSlotElement(slot, metrics));
             }
         }
 
@@ -282,43 +476,177 @@ public partial class DockWindow : Window
 
     public void RepositionDock()
     {
-        if (!IsLoaded) return;
+        if (_isClosed || !IsLoaded) return;
 
         UpdateLayout();
-        var workArea = SystemParameters.WorkArea;
-        var screenWidth = SystemParameters.PrimaryScreenWidth;
-        var screenHeight = SystemParameters.PrimaryScreenHeight;
+        var placement = DockPositionCalculator.CalculateBottomPlacement(
+            _targetMonitor,
+            ActualWidth,
+            ActualHeight,
+            _appConfig.Dock.AutoHideSystemTaskbar);
 
-        Left = Math.Round((screenWidth - ActualWidth) / 2.0);
-        // Bottom margin inside DockWindow is 14px, so anchoring to bottom leaves clean floating breathing room
-        var bottomAnchor = _appConfig.Dock.AutoHideSystemTaskbar
-            ? screenHeight
-            : workArea.Bottom;
-        Top = Math.Round(bottomAnchor - ActualHeight);
+        if (!DisplayMonitorService.MoveWindowPhysical(this, placement.PhysicalLeft, placement.PhysicalTop))
+        {
+            Left = placement.DipLeft;
+            Top = placement.DipTop;
+        }
     }
 
-    public void SetFullscreenHidden(bool hidden)
+    public void SetFullscreenHidden(bool isFullscreenOnMonitor)
     {
+        if (_isClosed)
+            return;
+
+        _isFullscreenOnMonitor = isFullscreenOnMonitor;
+
         if (!_appConfig.ShowDock || !_appConfig.Dock.Enabled)
         {
+            _edgeRevealStateMachine.Reset(isFullscreenHidden: false);
             HideDock();
             return;
         }
 
-        if (hidden && _appConfig.Dock.AutoHideOnFullscreen)
+        var shouldHideForFullscreen = isFullscreenOnMonitor && _appConfig.Dock.AutoHideOnFullscreen;
+        if (!shouldHideForFullscreen)
         {
+            _edgeRevealStateMachine.Reset(isFullscreenHidden: false);
+            RestoreNormalVisibility();
+            return;
+        }
+
+        // Fullscreen auto-hide is active on this monitor
+        if (!_appConfig.Dock.RevealDockOnBottomEdge ||
+            _edgeRevealStateMachine.State == DockEdgeRevealVisualState.Normal)
+        {
+            _edgeRevealStateMachine.Reset(isFullscreenHidden: true);
+            CancelFadeAnimation();
+            RestoreBaselineTopmost();
             HideDock();
         }
-        else if (!IsVisible)
+    }
+
+    public void UpdateEdgeRevealTick(int cursorX, int cursorY, long nowMs)
+    {
+        if (_isClosed || !_appConfig.ShowDock || !_appConfig.Dock.Enabled)
+            return;
+
+        var isAtBottomEdge = DockPositionCalculator.IsPointAtMonitorBottomEdge(
+            _targetMonitor,
+            cursorX,
+            cursorY,
+            edgeTolerancePx: 2);
+
+        var isInsideDock = IsVisible &&
+                           DisplayMonitorService.TryGetWindowPhysicalRect(this, out var winRect) &&
+                           winRect.Contains(cursorX, cursorY);
+
+        var step = _edgeRevealStateMachine.Update(
+            nowMs: nowMs,
+            isFullscreenHiddenActive: _isFullscreenOnMonitor && _appConfig.Dock.AutoHideOnFullscreen,
+            revealOnBottomEdgeEnabled: _appConfig.Dock.RevealDockOnBottomEdge,
+            isCursorAtBottomEdge: isAtBottomEdge,
+            isCursorInsideDock: isInsideDock,
+            hasOpenInteractiveOverlay: HasActiveOverlay);
+
+        if (!step.StateChanged)
+            return;
+
+        switch (step.State)
         {
-            Show();
-            ApplyClockSettings();
-            RepositionDock();
+            case DockEdgeRevealVisualState.TemporarilyRevealed:
+                RevealTemporarilyOverFullscreen();
+                break;
+
+            case DockEdgeRevealVisualState.FullscreenHidden:
+                HideBackToFullscreenQuietly();
+                break;
+
+            case DockEdgeRevealVisualState.Normal:
+                RestoreNormalVisibility();
+                break;
         }
+    }
+
+    private void RevealTemporarilyOverFullscreen()
+    {
+        CancelFadeAnimation();
+        var wasVisible = IsVisible;
+
+        Topmost = true;
+        if (!wasVisible)
+        {
+            Opacity = 0.0;
+            Show();
+        }
+
+        ApplyClockSettings();
+        RepositionDock();
+        DisplayMonitorService.SetWindowTopmostNoActivate(this, topmost: true);
+
+        var anim = new DoubleAnimation(Opacity, 1.0, TimeSpan.FromMilliseconds(150))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        };
+        BeginAnimation(OpacityProperty, anim);
+    }
+
+    private void HideBackToFullscreenQuietly()
+    {
+        if (!IsVisible)
+        {
+            RestoreBaselineTopmost();
+            return;
+        }
+
+        var generation = ++_fadeAnimationGeneration;
+        var anim = new DoubleAnimation(Opacity, 0.0, TimeSpan.FromMilliseconds(180))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseIn }
+        };
+        anim.Completed += (_, _) =>
+        {
+            if (_isClosed || generation != _fadeAnimationGeneration)
+                return;
+
+            if (_edgeRevealStateMachine.State == DockEdgeRevealVisualState.FullscreenHidden)
+            {
+                BeginAnimation(OpacityProperty, null);
+                RestoreBaselineTopmost();
+                HideDock();
+                Opacity = 1.0;
+            }
+        };
+        BeginAnimation(OpacityProperty, anim);
+    }
+
+    private void RestoreNormalVisibility()
+    {
+        CancelFadeAnimation();
+        RestoreBaselineTopmost();
+        Opacity = 1.0;
+
+        if (!IsVisible)
+            Show();
+
+        ApplyClockSettings();
+        RepositionDock();
+    }
+
+    private void CancelFadeAnimation()
+    {
+        _fadeAnimationGeneration++;
+        BeginAnimation(OpacityProperty, null);
+    }
+
+    private void RestoreBaselineTopmost()
+    {
+        Topmost = _baselineTopmost;
+        DisplayMonitorService.SetWindowTopmostNoActivate(this, _baselineTopmost);
     }
 
     public void HideDock()
     {
+        CancelFadeAnimation();
         _clockTimer.Stop();
         PowerMenuPopup.IsOpen = false;
         CloseActiveContextMenu();
@@ -331,19 +659,23 @@ public partial class DockWindow : Window
     private int GetHighDpiDockIconRequestPixels(double iconSize)
     {
         var dpi = VisualTreeHelper.GetDpi(this);
+        var effectiveDpi = Math.Max(
+            Math.Max(dpi.DpiScaleX, dpi.DpiScaleY),
+            Math.Max(_targetMonitor.SafeDpiScaleX, _targetMonitor.SafeDpiScaleY));
         var maxScale = _appConfig.Dock.EnableMagnification ? Math.Max(1.0, _appConfig.Dock.MagnificationScale) : 1.0;
-        return ShellIconService.ComputePhysicalIconPixels(iconSize * maxScale, Math.Max(dpi.DpiScaleX, dpi.DpiScaleY));
+        var baseRequestSize = Math.Max(iconSize, DockLayoutMetrics.ReferenceIconSize * DockLayoutMetrics.MaxScale);
+        return ShellIconService.ComputePhysicalIconPixels(baseRequestSize * maxScale, effectiveDpi);
     }
 
-    private Border BuildDockSlotElement(DockSlotItem slot, double iconSize)
+    private Border BuildDockSlotElement(DockSlotItem slot, DockLayoutMetrics metrics)
     {
         var tile = new Border
         {
-            Width = iconSize + 12,
-            Height = iconSize + 14,
-            Margin = new Thickness(4, 0, 4, 0),
-            Padding = new Thickness(4, 3, 4, 2),
-            CornerRadius = new CornerRadius(12),
+            Width = metrics.TileWidth,
+            Height = metrics.TileHeight,
+            Margin = new Thickness(metrics.TileHorizontalMargin, 0, metrics.TileHorizontalMargin, 0),
+            Padding = new Thickness(metrics.TilePaddingHorizontal, metrics.TilePaddingTop, metrics.TilePaddingHorizontal, metrics.TilePaddingBottom),
+            CornerRadius = new CornerRadius(metrics.TileCornerRadius),
             Background = slot.IsActive ? (Brush)FindResource("DgHoverBrush") : Brushes.Transparent,
             Cursor = Cursors.Hand,
             Tag = slot,
@@ -354,7 +686,7 @@ public partial class DockWindow : Window
 
         var grid = new Grid();
         grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(1, GridUnitType.Star) });
-        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(7) });
+        grid.RowDefinitions.Add(new RowDefinition { Height = new GridLength(metrics.IndicatorRowHeight) });
 
         var iconHost = new ContentControl
         {
@@ -362,19 +694,19 @@ public partial class DockWindow : Window
             VerticalAlignment = VerticalAlignment.Center,
             Focusable = false,
             IsTabStop = false,
-            Content = BuildSlotIconVisual(slot, iconSize)
+            Content = BuildSlotIconVisual(slot, metrics)
         };
         Grid.SetRow(iconHost, 0);
         grid.Children.Add(iconHost);
 
         var indicator = new Border
         {
-            Height = 3.5,
-            CornerRadius = new CornerRadius(2),
+            Height = metrics.IndicatorHeight,
+            CornerRadius = new CornerRadius(Math.Round(metrics.IndicatorHeight * 0.55, 1)),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Bottom
         };
-        ApplyIndicatorState(indicator, slot);
+        ApplyIndicatorState(indicator, slot, metrics);
         Grid.SetRow(indicator, 1);
         grid.Children.Add(indicator);
 
@@ -491,13 +823,15 @@ public partial class DockWindow : Window
         return tile;
     }
 
-    private void UpdateDockSlotElement(Border tile, DockSlotItem prev, DockSlotItem next, double iconSize, bool forceIconReload)
+    private void UpdateDockSlotElement(Border tile, DockSlotItem prev, DockSlotItem next, DockLayoutMetrics metrics, bool forceIconReload)
     {
         tile.Tag = next;
         tile.ToolTip = BuildSlotTooltip(next);
         tile.Background = next.IsActive || tile.IsMouseOver
             ? (Brush)FindResource("DgHoverBrush")
             : Brushes.Transparent;
+
+        ApplyTileLayoutMetrics(tile, next, metrics);
 
         if (tile.Child is Grid grid && grid.Children.Count >= 2)
         {
@@ -507,17 +841,17 @@ public partial class DockWindow : Window
                  prev.IsRunning != next.IsRunning ||
                  !string.Equals(prev.TargetPath, next.TargetPath, StringComparison.OrdinalIgnoreCase)))
             {
-                iconHost.Content = BuildSlotIconVisual(next, iconSize);
+                iconHost.Content = BuildSlotIconVisual(next, metrics);
             }
 
             if (grid.Children[1] is Border indicator)
-                ApplyIndicatorState(indicator, next);
+                ApplyIndicatorState(indicator, next, metrics);
         }
     }
 
-    private UIElement BuildSlotIconVisual(DockSlotItem slot, double iconSize)
+    private UIElement BuildSlotIconVisual(DockSlotItem slot, DockLayoutMetrics metrics)
     {
-        var requestPx = GetHighDpiDockIconRequestPixels(iconSize);
+        var requestPx = GetHighDpiDockIconRequestPixels(metrics.IconSize);
         var bmp = slot.IsRunning
             ? _shellService.GetIconForWindow(slot.PrimaryWindowHandle, slot.TargetPath, requestPx)
             : _shellService.GetIconForPath(slot.TargetPath, requestPx);
@@ -527,8 +861,8 @@ public partial class DockWindow : Window
             var img = new Image
             {
                 Source = bmp,
-                Width = iconSize - 4,
-                Height = iconSize - 4,
+                Width = metrics.IconVisualSize,
+                Height = metrics.IconVisualSize,
                 Stretch = Stretch.Uniform,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
@@ -543,14 +877,14 @@ public partial class DockWindow : Window
         {
             Text = slot.Kind == BoxItemKind.Folder ? "\uE8B7" : "\uE756",
             FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
-            FontSize = iconSize * 0.56,
+            FontSize = Math.Round(metrics.IconSize * 0.56, 1),
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Foreground = (Brush)FindResource("DgAccentBrush")
         };
     }
 
-    private void ApplyIndicatorState(Border indicator, DockSlotItem slot)
+    private void ApplyIndicatorState(Border indicator, DockSlotItem slot, DockLayoutMetrics metrics)
     {
         if (!slot.IsRunning)
         {
@@ -559,7 +893,9 @@ public partial class DockWindow : Window
         }
 
         indicator.Visibility = Visibility.Visible;
-        indicator.Width = slot.IsActive ? 16 : (slot.RunningCount > 1 ? 12 : 5);
+        indicator.Width = slot.IsActive
+            ? metrics.IndicatorActiveWidth
+            : (slot.RunningCount > 1 ? metrics.IndicatorMultiWidth : metrics.IndicatorSingleWidth);
         indicator.Background = slot.IsActive
             ? (Brush)FindResource("DgAccentBrush")
             : (Brush)FindResource("DgTextSecondaryBrush");
@@ -616,15 +952,33 @@ public partial class DockWindow : Window
             hwnd => _windowTracker.CloseWindow(hwnd));
 
         _activePopup = popup;
+        popup.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_activePopup, popup))
+                _activePopup = null;
+        };
+
         var screenPt = anchor.PointToScreen(new Point(anchor.ActualWidth / 2.0, 0));
         var dpi = VisualTreeHelper.GetDpi(this);
-        var dipX = screenPt.X / dpi.DpiScaleX;
-        var dipY = screenPt.Y / dpi.DpiScaleY;
 
         popup.Loaded += (_, _) =>
         {
-            popup.Left = Math.Max(8, Math.Min(SystemParameters.PrimaryScreenWidth - popup.ActualWidth - 8, dipX - popup.ActualWidth / 2.0));
-            popup.Top = Math.Max(8, dipY - popup.ActualHeight - 10);
+            var popupPhysW = (int)Math.Round(popup.ActualWidth * dpi.DpiScaleX);
+            var popupPhysH = (int)Math.Round(popup.ActualHeight * dpi.DpiScaleY);
+            var (physLeft, physTop) = DockPositionCalculator.ClampPopupAboveAnchor(
+                _targetMonitor,
+                (int)Math.Round(screenPt.X),
+                (int)Math.Round(screenPt.Y),
+                popupPhysW,
+                popupPhysH,
+                marginPx: (int)Math.Round(8 * dpi.DpiScaleX),
+                verticalGapPx: (int)Math.Round(10 * dpi.DpiScaleY));
+
+            if (!DisplayMonitorService.MoveWindowPhysical(popup, physLeft, physTop))
+            {
+                popup.Left = physLeft / dpi.DpiScaleX;
+                popup.Top = physTop / dpi.DpiScaleY;
+            }
         };
         popup.Show();
     }
@@ -821,7 +1175,13 @@ public partial class DockWindow : Window
             menu.Items.Add(closeAllMi);
         }
 
+        menu.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_activeContextMenu, menu))
+                _activeContextMenu = null;
+        };
         menu.PlacementTarget = target;
+        _activeContextMenu = menu;
         menu.IsOpen = true;
     }
 
@@ -1027,7 +1387,7 @@ public partial class DockWindow : Window
 
     private void ShowPinnedDropIndicator(double indicatorX)
     {
-        var indicatorHeight = Math.Max(28.0, Math.Min(PinnedPanel.ActualHeight - 8.0, _appConfig.Dock.BaseIconSize * 0.88));
+        var indicatorHeight = Math.Max(20.0, Math.Min(PinnedPanel.ActualHeight - 6.0, _layoutMetrics.IconSize * 0.88));
         PinnedDropIndicator.Height = indicatorHeight;
         var top = Math.Max(0.0, (PinnedPanel.ActualHeight - indicatorHeight) * 0.5 - 2.0);
         Canvas.SetLeft(PinnedDropIndicator, Math.Round(indicatorX - PinnedDropIndicator.Width * 0.5));

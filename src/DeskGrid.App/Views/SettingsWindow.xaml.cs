@@ -22,6 +22,7 @@ public partial class SettingsWindow : Window
     private readonly ConfigService _configService;
     private readonly Action _onSettingsApplied;
     private readonly Action<double> _onGlobalBoxOpacityChanged;
+    private readonly Action<double> _onDockScaleChanged;
     private readonly Action<double> _onDockMagnificationScaleChanged;
     private readonly Action<AppConfig> _onConfigReplaced;
     private readonly Action _onEmergencyRestore;
@@ -37,6 +38,7 @@ public partial class SettingsWindow : Window
         ConfigService configService,
         Action onSettingsApplied,
         Action<double> onGlobalBoxOpacityChanged,
+        Action<double> onDockScaleChanged,
         Action<double> onDockMagnificationScaleChanged,
         Action<AppConfig> onConfigReplaced,
         Action onEmergencyRestore,
@@ -46,6 +48,7 @@ public partial class SettingsWindow : Window
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
         _onSettingsApplied = onSettingsApplied ?? throw new ArgumentNullException(nameof(onSettingsApplied));
         _onGlobalBoxOpacityChanged = onGlobalBoxOpacityChanged ?? throw new ArgumentNullException(nameof(onGlobalBoxOpacityChanged));
+        _onDockScaleChanged = onDockScaleChanged ?? throw new ArgumentNullException(nameof(onDockScaleChanged));
         _onDockMagnificationScaleChanged = onDockMagnificationScaleChanged ?? throw new ArgumentNullException(nameof(onDockMagnificationScaleChanged));
         _onConfigReplaced = onConfigReplaced ?? throw new ArgumentNullException(nameof(onConfigReplaced));
         _onEmergencyRestore = onEmergencyRestore ?? throw new ArgumentNullException(nameof(onEmergencyRestore));
@@ -222,6 +225,18 @@ public partial class SettingsWindow : Window
 
         ShowDockCheck.IsChecked = _config.ShowDock;
         DockOptionsPanel.IsEnabled = _config.ShowDock;
+
+        MultiMonitorModeCombo.SelectedIndex = DockMultiMonitorModes.Normalize(_config.Dock.MultiMonitorMode) switch
+        {
+            DockMultiMonitorModes.AllMonitors => 1,
+            DockMultiMonitorModes.FollowMouse => 2,
+            _ => 0
+        };
+
+        var dockScale = DockLayoutMetrics.ClampScale(_config.Dock.DockScale);
+        DockScaleSlider.Value = dockScale;
+        DockScaleValueText.Text = $"{Math.Round(dockScale * 100)}%";
+
         MagnificationCheck.IsChecked = _config.Dock.EnableMagnification;
 
         var magScale = double.IsFinite(_config.Dock.MagnificationScale)
@@ -231,6 +246,8 @@ public partial class SettingsWindow : Window
         MagScaleValueText.Text = $"{magScale:0.00}x";
 
         FullscreenHideCheck.IsChecked = _config.Dock.AutoHideOnFullscreen;
+        RevealOnBottomEdgeCheck.IsChecked = _config.Dock.RevealDockOnBottomEdge;
+        RevealOnBottomEdgeCheck.IsEnabled = _config.Dock.AutoHideOnFullscreen;
         HideTaskbarCheck.IsChecked = _config.Dock.AutoHideSystemTaskbar;
         UpdateTaskbarHintVisibility(_config.Dock.AutoHideSystemTaskbar);
 
@@ -260,6 +277,21 @@ public partial class SettingsWindow : Window
 
         // Immediately sync background brush opacity across all currently open DesktopBoxWindow instances
         _onGlobalBoxOpacityChanged(opacity);
+
+        ScheduleDebouncedSliderSave();
+    }
+
+    private void OnDockScaleSliderValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_loading || !IsInitialized) return;
+        EnsureConfigSections();
+
+        var scale = DockLayoutMetrics.ClampScale(DockScaleSlider.Value);
+        _config.Dock.DockScale = scale;
+        DockScaleValueText.Text = $"{Math.Round(scale * 100)}%";
+
+        // Real-time proportional scaling preview across all visible Dock instances
+        _onDockScaleChanged(scale);
 
         ScheduleDebouncedSliderSave();
     }
@@ -320,10 +352,19 @@ public partial class SettingsWindow : Window
         _config.ShowDock = ShowDockCheck.IsChecked == true;
         _config.Dock.Enabled = _config.ShowDock;
         DockOptionsPanel.IsEnabled = _config.ShowDock;
+
+        if (MultiMonitorModeCombo.SelectedItem is ComboBoxItem monitorItem && monitorItem.Tag is string modeTag)
+            _config.Dock.MultiMonitorMode = DockMultiMonitorModes.Normalize(modeTag);
+
+        _config.Dock.DockScale = DockLayoutMetrics.ClampScale(DockScaleSlider.Value);
+        DockScaleValueText.Text = $"{Math.Round(_config.Dock.DockScale * 100)}%";
+
         _config.Dock.EnableMagnification = MagnificationCheck.IsChecked == true;
         _config.Dock.MagnificationScale = Math.Round(MagScaleSlider.Value, 2);
         MagScaleValueText.Text = $"{_config.Dock.MagnificationScale:0.00}x";
         _config.Dock.AutoHideOnFullscreen = FullscreenHideCheck.IsChecked == true;
+        RevealOnBottomEdgeCheck.IsEnabled = _config.Dock.AutoHideOnFullscreen;
+        _config.Dock.RevealDockOnBottomEdge = RevealOnBottomEdgeCheck.IsChecked == true;
         _config.Dock.AutoHideSystemTaskbar = HideTaskbarCheck.IsChecked == true;
         UpdateTaskbarHintVisibility(_config.Dock.AutoHideSystemTaskbar);
 

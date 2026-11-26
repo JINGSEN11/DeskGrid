@@ -32,7 +32,10 @@ public interface ITaskbarService : IDisposable
 public interface IFullscreenMonitor : IDisposable
 {
     event EventHandler<bool>? FullscreenStateChanged;
+    event EventHandler<IReadOnlySet<nint>>? FullscreenMonitorsChanged;
     bool IsFullscreenActive { get; }
+    IReadOnlySet<nint> FullscreenMonitorHandles { get; }
+    bool IsMonitorFullscreen(nint monitorHandle);
     void Start();
     void Stop();
 }

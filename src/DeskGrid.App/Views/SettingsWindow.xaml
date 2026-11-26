@@ -318,6 +318,40 @@
                         <CheckBox x:Name="ShowDockCheck" Content="启用底部悬浮 Dock 栏" Margin="0,4,0,10" Checked="OnSettingChanged" Unchecked="OnSettingChanged"/>
 
                         <StackPanel x:Name="DockOptionsPanel">
+                            <Grid Margin="0,0,0,14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="*"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{DynamicResource StrSettingsDockMultiMonitorLabel}" VerticalAlignment="Center"/>
+                                <ComboBox x:Name="MultiMonitorModeCombo" Grid.Column="1" Width="220" HorizontalAlignment="Left" SelectionChanged="OnSettingChanged">
+                                    <ComboBoxItem Content="{DynamicResource StrSettingsDockMultiMonitorPrimaryOnly}" Tag="PrimaryOnly"/>
+                                    <ComboBoxItem Content="{DynamicResource StrSettingsDockMultiMonitorAllMonitors}" Tag="AllMonitors"/>
+                                    <ComboBoxItem Content="{DynamicResource StrSettingsDockMultiMonitorFollowMouse}" Tag="FollowMouse"/>
+                                </ComboBox>
+                            </Grid>
+
+                            <Grid Margin="0,0,0,14">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="160"/>
+                                    <ColumnDefinition Width="*"/>
+                                    <ColumnDefinition Width="48"/>
+                                </Grid.ColumnDefinitions>
+                                <TextBlock Text="{DynamicResource StrSettingsDockScaleLabel}" VerticalAlignment="Center"/>
+                                <Slider x:Name="DockScaleSlider"
+                                        Grid.Column="1"
+                                        Minimum="0.70"
+                                        Maximum="1.30"
+                                        SmallChange="0.01"
+                                        LargeChange="0.05"
+                                        TickFrequency="0.01"
+                                        ScrollViewer.PanningMode="None"
+                                        IsSnapToTickEnabled="False"
+                                        IsMoveToPointEnabled="True"
+                                        ValueChanged="OnDockScaleSliderValueChanged"/>
+                                <TextBlock x:Name="DockScaleValueText" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right"/>
+                            </Grid>
+
                             <CheckBox x:Name="MagnificationCheck" Content="启用鼠标悬停波浪放大动效" Margin="0,0,0,10" Checked="OnSettingChanged" Unchecked="OnSettingChanged"/>
 
                             <Grid Margin="0,0,0,14">
@@ -345,6 +379,11 @@
                             <TextBlock Text="防打扰与任务栏协同" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
 
                             <CheckBox x:Name="FullscreenHideCheck" Content="检测到全屏游戏或全屏视频时自动静默隐藏 Dock" Margin="0,4,0,8" Checked="OnSettingChanged" Unchecked="OnSettingChanged"/>
+                            <CheckBox x:Name="RevealOnBottomEdgeCheck"
+                                      Content="{DynamicResource StrSettingsDockRevealOnBottomEdge}"
+                                      Margin="24,0,0,10"
+                                      Checked="OnSettingChanged"
+                                      Unchecked="OnSettingChanged"/>
                             <CheckBox x:Name="HideTaskbarCheck" Content="自动隐藏 Windows 原生任务栏（安全退出或重启后自动恢复）" Margin="0,4,0,6" Checked="OnSettingChanged" Unchecked="OnSettingChanged"/>
                             <TextBlock x:Name="TaskbarUncheckedHintText"
                                        Text="提示：未开启隐藏原生任务栏时，Dock 会自动悬浮在原生任务栏上方，互不遮挡。"

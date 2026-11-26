@@ -29,6 +29,7 @@ public sealed class DockMagnifyingPanel : StackPanel
     private int? _dragInsertionSlot;
 
     public bool EnableMagnification { get; set; } = true;
+    public double DockScale { get; set; } = DockLayoutMetrics.DefaultScale;
     public double MaxScale { get; set; } = 1.42;
     public double EffectRadius { get; set; } = 130.0;
 
@@ -275,14 +276,15 @@ public sealed class DockMagnifyingPanel : StackPanel
             return;
 
         var slot = Math.Clamp(_dragInsertionSlot.Value, 0, count);
+        var partShift = DragPartShiftPixels * DockLayoutMetrics.ClampScale(DockScale);
         for (var i = 0; i < count; i++)
         {
             if (slot == 0)
-                _targetOffsetX[i] = DragPartShiftPixels;
+                _targetOffsetX[i] = partShift;
             else if (slot == count)
-                _targetOffsetX[i] = -DragPartShiftPixels;
+                _targetOffsetX[i] = -partShift;
             else
-                _targetOffsetX[i] = i < slot ? -DragPartShiftPixels : DragPartShiftPixels;
+                _targetOffsetX[i] = i < slot ? -partShift : partShift;
         }
     }
 
@@ -312,9 +314,12 @@ public sealed class DockMagnifyingPanel : StackPanel
         }
 
         // Allow vertical headroom for upward-magnified icons while strictly checking horizontal panel bounds
-        var maxUpwardHeadroom = Math.Max(42.0, (Math.Clamp(MaxScale, 1.0, 2.0) - 1.0) * (ActualHeight + 24.0) + 12.0);
-        if (localPt.X < -8.0 || localPt.X > ActualWidth + 8.0 ||
-            localPt.Y < -maxUpwardHeadroom || localPt.Y > ActualHeight + 10.0)
+        var safeDockScale = DockLayoutMetrics.ClampScale(DockScale);
+        var maxUpwardHeadroom = Math.Max(
+            DockLayoutMetrics.ComputeTopBufferHeight(safeDockScale, MaxScale, EnableMagnification),
+            (Math.Clamp(MaxScale, 1.0, 2.0) - 1.0) * (ActualHeight + 24.0 * safeDockScale) + 12.0 * safeDockScale);
+        if (localPt.X < -8.0 * safeDockScale || localPt.X > ActualWidth + 8.0 * safeDockScale ||
+            localPt.Y < -maxUpwardHeadroom || localPt.Y > ActualHeight + 10.0 * safeDockScale)
         {
             return null;
         }
@@ -345,12 +350,13 @@ public sealed class DockMagnifyingPanel : StackPanel
             }
         }
 
+        var effectiveRadius = EffectRadius * DockLayoutMetrics.ClampScale(DockScale);
         _targetScales = DockMagnificationCalculator.ComputeScales(
             _mouseX,
             centers,
             EnableMagnification,
             MaxScale,
-            EffectRadius);
+            effectiveRadius);
     }
 
     private bool AnyTransformNotSettled()
@@ -467,10 +473,11 @@ public sealed class DockMagnifyingPanel : StackPanel
 
             var scaleTx = (ScaleTransform)group.Children[0];
             var transTx = (TranslateTransform)group.Children[1];
+            var liftPx = 14.0 * DockLayoutMetrics.ClampScale(DockScale);
             scaleTx.ScaleX = s;
             scaleTx.ScaleY = s;
             transTx.X = Math.Abs(offsetX) <= 0.05 ? 0.0 : offsetX;
-            transTx.Y = Math.Abs(s - 1.0) <= 0.001 ? 0.0 : -(s - 1.0) * 14.0;
+            transTx.Y = Math.Abs(s - 1.0) <= 0.001 ? 0.0 : -(s - 1.0) * liftPx;
             Panel.SetZIndex(fe, Math.Abs(s - 1.0) <= 0.001 ? 0 : (int)Math.Round(s * 100));
         }
     }

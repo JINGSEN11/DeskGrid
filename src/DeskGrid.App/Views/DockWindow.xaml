@@ -65,7 +65,7 @@
     </Window.Resources>
 
     <!-- Top margin reserves headroom for smooth wave icon magnification without clipping -->
-    <Grid Margin="20,40,20,14">
+    <Grid x:Name="DockRootGrid" Margin="20,40,20,14">
         <!-- Dedicated sibling shadow + glass pill backdrop: NEVER wraps Dock icons or controls -->
         <Border x:Name="DockShadowBackdrop"
                 Background="{DynamicResource DgDockSurfaceBrush}"
@@ -91,11 +91,13 @@
 
             <Grid>
                 <!-- Matching Liquid Glass specular sheen -->
-                <Border CornerRadius="21"
+                <Border x:Name="DockSheenBorder"
+                        CornerRadius="21"
                         Background="{DynamicResource DgGlassSheenBrush}"
                         IsHitTestVisible="False"/>
 
-                <StackPanel Orientation="Horizontal"
+                <StackPanel x:Name="DockContentPanel"
+                            Orientation="Horizontal"
                             VerticalAlignment="Center"
                             Margin="12,8,12,8">
                     <!-- 1. Leftmost: Quick Tools Section -->
@@ -126,7 +128,8 @@
                     </StackPanel>
 
                     <!-- Divider between Quick Tools & Pinned Apps -->
-                    <Border Width="1"
+                    <Border x:Name="QuickToolsDivider"
+                            Width="1"
                             Height="28"
                             Margin="10,0,10,0"
                             VerticalAlignment="Center"

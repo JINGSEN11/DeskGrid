@@ -6,6 +6,7 @@
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <ResourceDictionary Source="Themes/FluentStyles.xaml"/>
+                <ResourceDictionary Source="Localization/Strings.zh-CN.xaml"/>
             </ResourceDictionary.MergedDictionaries>
 
             <FontFamily x:Key="DgUiFontFamily">Segoe UI Variable Text, Microsoft YaHei UI, SimSun</FontFamily>
