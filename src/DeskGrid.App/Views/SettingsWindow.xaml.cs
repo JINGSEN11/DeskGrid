@@ -21,6 +21,8 @@ public partial class SettingsWindow : Window
     private bool _hasPendingOpacitySave;
     private bool _loading = true;
 
+    public bool IsClosed { get; private set; }
+
     public SettingsWindow(
         AppConfig config,
         ConfigService configService,
@@ -29,14 +31,14 @@ public partial class SettingsWindow : Window
         Action<AppConfig> onConfigReplaced,
         Action onEmergencyRestore)
     {
-        InitializeComponent();
+        _config = config ?? throw new ArgumentNullException(nameof(config));
+        _configService = configService ?? throw new ArgumentNullException(nameof(configService));
+        _onSettingsApplied = onSettingsApplied ?? throw new ArgumentNullException(nameof(onSettingsApplied));
+        _onGlobalBoxOpacityChanged = onGlobalBoxOpacityChanged ?? throw new ArgumentNullException(nameof(onGlobalBoxOpacityChanged));
+        _onConfigReplaced = onConfigReplaced ?? throw new ArgumentNullException(nameof(onConfigReplaced));
+        _onEmergencyRestore = onEmergencyRestore ?? throw new ArgumentNullException(nameof(onEmergencyRestore));
 
-        _config = config;
-        _configService = configService;
-        _onSettingsApplied = onSettingsApplied;
-        _onGlobalBoxOpacityChanged = onGlobalBoxOpacityChanged;
-        _onConfigReplaced = onConfigReplaced;
-        _onEmergencyRestore = onEmergencyRestore;
+        EnsureConfigSections();
 
         _opacitySaveDebounceTimer = new DispatcherTimer
         {
@@ -44,19 +46,41 @@ public partial class SettingsWindow : Window
         };
         _opacitySaveDebounceTimer.Tick += (_, _) => FlushPendingOpacitySave();
 
+        InitializeComponent();
+
         LoadControlsFromConfig();
         _loading = false;
     }
 
     public void SyncFromConfig()
     {
+        if (IsClosed || !IsInitialized)
+            return;
+
         _loading = true;
-        LoadControlsFromConfig();
-        _loading = false;
+        try
+        {
+            LoadControlsFromConfig();
+        }
+        finally
+        {
+            _loading = false;
+        }
+    }
+
+    private void EnsureConfigSections()
+    {
+        _config.Appearance ??= new AppearanceSettings();
+        _config.Behavior ??= new BehaviorSettings();
+        _config.Dock ??= new DockConfig();
+        _config.Dock.PinnedItems ??= [];
+        _config.Boxes ??= [];
     }
 
     private void LoadControlsFromConfig()
     {
+        EnsureConfigSections();
+
         ThemeCombo.SelectedIndex = _config.Appearance.Theme switch
         {
             ThemePreference.Light => 1,
@@ -64,8 +88,12 @@ public partial class SettingsWindow : Window
             _ => 0
         };
         BackdropCombo.SelectedIndex = _config.Appearance.Backdrop == BackdropPreference.Mica ? 1 : 0;
-        OpacitySlider.Value = _config.Appearance.DefaultBoxOpacity;
-        OpacityValueText.Text = $"{Math.Round(_config.Appearance.DefaultBoxOpacity * 100)}%";
+
+        var defaultOpacity = double.IsFinite(_config.Appearance.DefaultBoxOpacity)
+            ? Math.Clamp(_config.Appearance.DefaultBoxOpacity, OpacitySlider.Minimum, OpacitySlider.Maximum)
+            : 0.35;
+        OpacitySlider.Value = defaultOpacity;
+        OpacityValueText.Text = $"{Math.Round(defaultOpacity * 100)}%";
 
         StartupCheck.IsChecked = _config.Behavior.LaunchAtStartup;
         DoubleClickDesktopCheck.IsChecked = _config.Behavior.DoubleClickDesktopToToggleBoxes;
@@ -74,8 +102,13 @@ public partial class SettingsWindow : Window
         ShowDockCheck.IsChecked = _config.ShowDock;
         DockOptionsPanel.IsEnabled = _config.ShowDock;
         MagnificationCheck.IsChecked = _config.Dock.EnableMagnification;
-        MagScaleSlider.Value = _config.Dock.MagnificationScale;
-        MagScaleValueText.Text = $"{_config.Dock.MagnificationScale:0.00}x";
+
+        var magScale = double.IsFinite(_config.Dock.MagnificationScale)
+            ? Math.Clamp(_config.Dock.MagnificationScale, MagScaleSlider.Minimum, MagScaleSlider.Maximum)
+            : 1.42;
+        MagScaleSlider.Value = magScale;
+        MagScaleValueText.Text = $"{magScale:0.00}x";
+
         FullscreenHideCheck.IsChecked = _config.Dock.AutoHideOnFullscreen;
         HideTaskbarCheck.IsChecked = _config.Dock.AutoHideSystemTaskbar;
         UpdateTaskbarHintVisibility(_config.Dock.AutoHideSystemTaskbar);
@@ -89,13 +122,16 @@ public partial class SettingsWindow : Window
 
     private void UpdateTaskbarHintVisibility(bool isHideTaskbarEnabled)
     {
-        TaskbarUncheckedHintText.Visibility = isHideTaskbarEnabled ? Visibility.Collapsed : Visibility.Visible;
-        TaskbarCheckedHintText.Visibility = isHideTaskbarEnabled ? Visibility.Visible : Visibility.Collapsed;
+        if (TaskbarUncheckedHintText is not null)
+            TaskbarUncheckedHintText.Visibility = isHideTaskbarEnabled ? Visibility.Collapsed : Visibility.Visible;
+        if (TaskbarCheckedHintText is not null)
+            TaskbarCheckedHintText.Visibility = isHideTaskbarEnabled ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void OnOpacitySliderValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        if (_loading) return;
+        if (_loading || !IsInitialized) return;
+        EnsureConfigSections();
 
         var opacity = Math.Round(OpacitySlider.Value, 2);
         _config.Appearance.DefaultBoxOpacity = opacity;
@@ -112,7 +148,7 @@ public partial class SettingsWindow : Window
 
     private void FlushPendingOpacitySave()
     {
-        _opacitySaveDebounceTimer.Stop();
+        _opacitySaveDebounceTimer?.Stop();
         if (!_hasPendingOpacitySave)
             return;
 
@@ -122,7 +158,8 @@ public partial class SettingsWindow : Window
 
     private void OnSettingChanged(object sender, RoutedEventArgs e)
     {
-        if (_loading) return;
+        if (_loading || !IsInitialized) return;
+        EnsureConfigSections();
 
         if (ThemeCombo.SelectedItem is ComboBoxItem themeItem && themeItem.Tag is string themeTag &&
             Enum.TryParse<ThemePreference>(themeTag, out var themePref))
@@ -222,9 +259,10 @@ public partial class SettingsWindow : Window
                 UseShellExecute = true
             });
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore
+            Trace.WriteLine($"[DeskGrid] Failed to open config directory: {ex}");
+            MessageBox.Show(this, $"无法打开配置目录：{ex.Message}", "DeskGrid", MessageBoxButton.OK, MessageBoxImage.Warning);
         }
     }
 
@@ -264,6 +302,13 @@ public partial class SettingsWindow : Window
     }
 
     private void OnWindowClosing(object? sender, CancelEventArgs e) => FlushPendingOpacitySave();
+
+    protected override void OnClosed(EventArgs e)
+    {
+        IsClosed = true;
+        _opacitySaveDebounceTimer?.Stop();
+        base.OnClosed(e);
+    }
 
     private void OnClose(object sender, RoutedEventArgs e) => Close();
 }

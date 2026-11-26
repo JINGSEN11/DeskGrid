@@ -632,7 +632,11 @@ public partial class DockWindow : Window
         menu.Items.Add(newBoxMi);
 
         var settingsMi = new MenuItem { Header = "偏好设置..." };
-        settingsMi.Click += (_, _) => _onOpenSettings();
+        settingsMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onOpenSettings();
+        };
         menu.Items.Add(settingsMi);
 
         menu.PlacementTarget = DockPill;
@@ -846,8 +850,19 @@ public partial class DockWindow : Window
         UpdateQuickToolStates();
     }
 
-    private void OnNewBox(object sender, RoutedEventArgs e) => _onCreateBox();
-    private void OnOpenSettings(object sender, RoutedEventArgs e) => _onOpenSettings();
+    private void OnNewBox(object sender, RoutedEventArgs e)
+    {
+        PowerMenuPopup.IsOpen = false;
+        _onCreateBox();
+    }
+
+    private void OnOpenSettings(object sender, RoutedEventArgs e)
+    {
+        PowerMenuPopup.IsOpen = false;
+        try { _activePopup?.Close(); } catch { }
+        _activePopup = null;
+        _onOpenSettings();
+    }
 
     private int FindPinnedTileIndex(string itemId)
     {

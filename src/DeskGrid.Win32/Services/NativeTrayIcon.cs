@@ -196,6 +196,9 @@ public sealed class NativeTrayIcon : IDisposable
                     handled = true;
                     break;
                 case NativeMethods.WM_RBUTTONUP:
+                    // Promote the tray host window before opening the context menu so Windows grants
+                    // foreground activation privileges to subsequent windows (e.g. SettingsWindow).
+                    NativeMethods.SetForegroundWindow(hwnd);
                     RightClicked?.Invoke(this, EventArgs.Empty);
                     handled = true;
                     break;

@@ -23,6 +23,7 @@ public sealed class TrayIconController : IDisposable
     private readonly Action _onRestoreTaskbar;
     private readonly Action _onOpenSettings;
     private readonly Action _onExit;
+    private ContextMenu? _activeContextMenu;
 
     public TrayIconController(
         INativeDesktopIconService nativeIcons,
@@ -73,50 +74,90 @@ public sealed class TrayIconController : IDisposable
 
     private void ShowFluentTrayMenu()
     {
+        if (_activeContextMenu is not null)
+        {
+            _activeContextMenu.IsOpen = false;
+            _activeContextMenu = null;
+        }
+
         var menu = ThemePalette.CreateThemedContextMenu();
         menu.Placement = PlacementMode.MousePoint;
+        menu.Closed += (_, _) =>
+        {
+            if (ReferenceEquals(_activeContextMenu, menu))
+                _activeContextMenu = null;
+        };
 
         var newBoxMi = new MenuItem { Header = "新建桌面盒子..." };
-        newBoxMi.Click += (_, _) => _onCreateBox();
+        newBoxMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onCreateBox();
+        };
         menu.Items.Add(newBoxMi);
 
         var toggleBoxesMi = new MenuItem
         {
             Header = _areBoxesVisible() ? "隐藏所有桌面盒子" : "显示所有桌面盒子"
         };
-        toggleBoxesMi.Click += (_, _) => _onToggleBoxes();
+        toggleBoxesMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onToggleBoxes();
+        };
         menu.Items.Add(toggleBoxesMi);
 
         var toggleDockMi = new MenuItem
         {
             Header = _isDockVisible() ? "隐藏 Dock 栏" : "显示 Dock 栏"
         };
-        toggleDockMi.Click += (_, _) => _onToggleDock();
+        toggleDockMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onToggleDock();
+        };
         menu.Items.Add(toggleDockMi);
 
         var toggleNativeMi = new MenuItem
         {
             Header = _nativeIcons.AreIconsVisible() ? "隐藏系统原生桌面图标" : "显示系统原生桌面图标"
         };
-        toggleNativeMi.Click += (_, _) => _onToggleNativeIcons();
+        toggleNativeMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onToggleNativeIcons();
+        };
         menu.Items.Add(toggleNativeMi);
 
         menu.Items.Add(new Separator());
 
         var restoreTaskbarMi = new MenuItem { Header = "恢复系统任务栏" };
-        restoreTaskbarMi.Click += (_, _) => _onRestoreTaskbar();
+        restoreTaskbarMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onRestoreTaskbar();
+        };
         menu.Items.Add(restoreTaskbarMi);
 
         var settingsMi = new MenuItem { Header = "偏好设置..." };
-        settingsMi.Click += (_, _) => _onOpenSettings();
+        settingsMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onOpenSettings();
+        };
         menu.Items.Add(settingsMi);
 
         menu.Items.Add(new Separator());
 
         var exitMi = new MenuItem { Header = "安全退出 DeskGrid" };
-        exitMi.Click += (_, _) => _onExit();
+        exitMi.Click += (_, _) =>
+        {
+            menu.IsOpen = false;
+            _onExit();
+        };
         menu.Items.Add(exitMi);
 
+        _activeContextMenu = menu;
         menu.IsOpen = true;
     }
 

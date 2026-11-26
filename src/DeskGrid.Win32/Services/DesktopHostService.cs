@@ -98,6 +98,28 @@ public sealed class DesktopHostService : IDisposable
         NativeMethods.SetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE, exStyle);
     }
 
+    public static void BringWindowToForeground(Window window)
+    {
+        var hwnd = new WindowInteropHelper(window).Handle;
+        if (hwnd == 0 || !NativeMethods.IsWindow(hwnd))
+            return;
+
+        if (NativeMethods.IsIconic(hwnd))
+            NativeMethods.ShowWindow(hwnd, NativeMethods.SW_RESTORE);
+
+        NativeMethods.SetWindowPos(
+            hwnd,
+            NativeMethods.HWND_TOPMOST,
+            0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_SHOWWINDOW);
+        NativeMethods.SetWindowPos(
+            hwnd,
+            NativeMethods.HWND_NOTOPMOST,
+            0, 0, 0, 0,
+            NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_SHOWWINDOW);
+        NativeMethods.SetForegroundWindow(hwnd);
+    }
+
     public static bool TryGetCursorScreenPosition(out int x, out int y)
     {
         if (NativeMethods.GetCursorPos(out var pt))

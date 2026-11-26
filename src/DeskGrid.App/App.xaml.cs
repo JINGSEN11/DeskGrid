@@ -1,4 +1,7 @@
+using System.Diagnostics;
+using System.IO;
 using System.Windows;
+using System.Windows.Threading;
 using DeskGrid.App.Helpers;
 using DeskGrid.App.Services;
 using DeskGrid.App.Views;
@@ -53,6 +56,7 @@ public partial class App : Application
         DispatcherUnhandledException += (_, args) =>
         {
             SafeRestoreSystemState();
+            LogError("DispatcherUnhandledException", args.Exception);
             MessageBox.Show($"DeskGrid 遇到意外错误并已保护系统状态：{args.Exception.Message}", "DeskGrid", MessageBoxButton.OK, MessageBoxImage.Error);
             args.Handled = true;
         };
@@ -113,7 +117,7 @@ public partial class App : Application
             _shellService,
             ToggleAllBoxesVisibility,
             OpenCreateBoxDialog,
-            OpenSettingsWindow);
+            ShowSettingsWindow);
 
         if (_config.ShowDock)
             _dockWindow.Show();
@@ -132,7 +136,7 @@ public partial class App : Application
                 _dockWindow?.UpdateQuickToolStates();
             },
             EmergencyRestoreSystemState,
-            OpenSettingsWindow,
+            ShowSettingsWindow,
             ShutdownSafely);
 
         ApplySystemSettings();
@@ -193,7 +197,8 @@ public partial class App : Application
         _config.Dock.Enabled = _config.ShowDock;
         _configService.Save(_config);
         ApplyAllSettingsLive();
-        _settingsWindow?.SyncFromConfig();
+        if (_settingsWindow is { IsClosed: false, IsLoaded: true })
+            _settingsWindow.SyncFromConfig();
     }
 
     private void OpenCreateBoxDialog()
@@ -208,24 +213,153 @@ public partial class App : Application
         }
     }
 
-    private void OpenSettingsWindow()
+    public void ShowSettingsWindow()
     {
-        if (_settingsWindow is not null && _settingsWindow.IsLoaded)
+        if (!Dispatcher.CheckAccess())
         {
-            _settingsWindow.Activate();
+            Dispatcher.BeginInvoke(ShowSettingsWindow);
             return;
         }
 
-        _settingsWindow = new SettingsWindow(
-            _config,
-            _configService,
-            ApplyAllSettingsLive,
-            ApplyGlobalBoxOpacityLive,
-            ReplaceConfigAndReload,
-            EmergencyRestoreSystemState);
+        try
+        {
+            if (_settingsWindow is { IsClosed: false } existing && existing.IsLoaded)
+            {
+                existing.SyncFromConfig();
+                if (existing.WindowState == WindowState.Minimized)
+                    existing.WindowState = WindowState.Normal;
+                if (!existing.IsVisible)
+                    existing.Show();
 
-        _settingsWindow.Closed += (_, _) => _settingsWindow = null;
-        _settingsWindow.Show();
+                EnsureWindowInWorkArea(existing);
+                ScheduleSettingsWindowActivation(existing);
+                return;
+            }
+
+            // Discard any stale/closed instance before creating a fresh window
+            _settingsWindow = null;
+
+            var window = new SettingsWindow(
+                _config,
+                _configService,
+                ApplyAllSettingsLive,
+                ApplyGlobalBoxOpacityLive,
+                ReplaceConfigAndReload,
+                EmergencyRestoreSystemState);
+
+            // Never bind Owner to HWND_BOTTOM DesktopBoxWindow or WS_EX_NOACTIVATE DockWindow
+            window.Owner = null;
+            window.ShowInTaskbar = true;
+            window.WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            window.WindowState = WindowState.Normal;
+            EnsureWindowInWorkArea(window);
+
+            window.Closed += (_, _) =>
+            {
+                if (ReferenceEquals(_settingsWindow, window))
+                    _settingsWindow = null;
+            };
+
+            _settingsWindow = window;
+            window.Show();
+            EnsureWindowInWorkArea(window);
+            ScheduleSettingsWindowActivation(window);
+        }
+        catch (Exception ex)
+        {
+            _settingsWindow = null;
+            var logPath = LogError("ShowSettingsWindow", ex);
+            var details = string.IsNullOrEmpty(logPath)
+                ? ex.Message
+                : $"{ex.Message}\n\n错误日志：{logPath}";
+            MessageBox.Show(
+                $"无法打开偏好设置窗口：{details}",
+                "DeskGrid",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+        }
+    }
+
+    private void ScheduleSettingsWindowActivation(SettingsWindow window)
+    {
+        // Delay foreground activation to ApplicationIdle so closing ContextMenus or
+        // WS_EX_NOACTIVATE Dock clicks cannot steal focus back from SettingsWindow.
+        Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
+        {
+            if (window.IsClosed || !window.IsLoaded)
+                return;
+
+            if (window.WindowState == WindowState.Minimized)
+                window.WindowState = WindowState.Normal;
+
+            EnsureWindowInWorkArea(window);
+
+            window.Topmost = true;
+            window.Topmost = false;
+            DesktopHostService.BringWindowToForeground(window);
+            window.Activate();
+            window.Focus();
+        });
+    }
+
+    private static void EnsureWindowInWorkArea(Window window)
+    {
+        var workArea = SystemParameters.WorkArea;
+        if (!double.IsFinite(workArea.Width) || workArea.Width <= 0 ||
+            !double.IsFinite(workArea.Height) || workArea.Height <= 0)
+        {
+            return;
+        }
+
+        var width = window.ActualWidth > 0
+            ? window.ActualWidth
+            : (double.IsFinite(window.Width) && window.Width > 0 ? window.Width : 660.0);
+        var height = window.ActualHeight > 0
+            ? window.ActualHeight
+            : (double.IsFinite(window.Height) && window.Height > 0 ? window.Height : 580.0);
+
+        var maxLeft = Math.Max(workArea.Left, workArea.Right - width);
+        var maxTop = Math.Max(workArea.Top, workArea.Bottom - height);
+
+        var isLeftOutOfRange = !double.IsFinite(window.Left) ||
+                               window.Left < workArea.Left ||
+                               window.Left > maxLeft;
+        var isTopOutOfRange = !double.IsFinite(window.Top) ||
+                              window.Top < workArea.Top ||
+                              window.Top > maxTop;
+
+        if (isLeftOutOfRange)
+        {
+            var centeredLeft = workArea.Left + (workArea.Width - width) / 2.0;
+            window.Left = Math.Round(Math.Clamp(centeredLeft, workArea.Left, maxLeft));
+        }
+
+        if (isTopOutOfRange)
+        {
+            var centeredTop = workArea.Top + (workArea.Height - height) / 2.0;
+            window.Top = Math.Round(Math.Clamp(centeredTop, workArea.Top, maxTop));
+        }
+    }
+
+    private string? LogError(string context, Exception ex)
+    {
+        var message = $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss.fff}] [{context}] {ex}{Environment.NewLine}";
+        Trace.WriteLine(message);
+        try
+        {
+            var dir = _configService?.ConfigDirectory;
+            if (string.IsNullOrWhiteSpace(dir))
+                return null;
+
+            Directory.CreateDirectory(dir);
+            var logPath = Path.Combine(dir, "deskgrid-error.log");
+            File.AppendAllText(logPath, message);
+            return logPath;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void ApplyGlobalBoxOpacityLive(double opacity)
@@ -325,7 +459,7 @@ public partial class App : Application
             _shellService,
             ToggleAllBoxesVisibility,
             OpenCreateBoxDialog,
-            OpenSettingsWindow);
+            ShowSettingsWindow);
 
         if (_config.ShowDock)
             _dockWindow.Show();
