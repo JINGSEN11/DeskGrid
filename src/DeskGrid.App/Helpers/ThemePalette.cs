@@ -52,16 +52,20 @@ public static class ThemePalette
         return true;
     }
 
+    public static ThemeMode ToWpfThemeMode(ThemePreference preference) => preference switch
+    {
+        ThemePreference.Light => ThemeMode.Light,
+        ThemePreference.Dark => ThemeMode.Dark,
+        _ => ThemeMode.System
+    };
+
     public static void ApplyToApplication(Application app, ThemePreference preference)
     {
         var dark = IsDarkMode(preference);
 
-        app.ThemeMode = preference switch
-        {
-            ThemePreference.Light => ThemeMode.Light,
-            ThemePreference.Dark => ThemeMode.Dark,
-            _ => ThemeMode.System
-        };
+        var targetThemeMode = ToWpfThemeMode(preference);
+        if (app.ThemeMode != targetThemeMode)
+            app.ThemeMode = targetThemeMode;
 
         var res = app.Resources;
         if (dark)
@@ -89,6 +93,20 @@ public static class ThemePalette
             res["DgAccentMutedBrush"] = CreateFrozenBrush(Color.FromArgb(0x34, 0x6C, 0xD4, 0xFF));
             res["DgPopupBrush"] = CreateFrozenBrush(Color.FromArgb(0xCC, 0x16, 0x18, 0x20));
             res["DgDangerBrush"] = CreateFrozenBrush(Color.FromRgb(0xFF, 0x7A, 0x7A));
+
+            // SettingsWindow dedicated high-contrast palette (Dark Mode)
+            res["DgSettingsNavForegroundBrush"] = CreateFrozenBrush(Color.FromRgb(0xD1, 0xD5, 0xDB));
+            res["DgSettingsNavHoverForegroundBrush"] = CreateFrozenBrush(Color.FromRgb(0xFF, 0xFF, 0xFF));
+            res["DgSettingsNavHoverBackgroundBrush"] = CreateFrozenBrush(Color.FromArgb(0x14, 0xFF, 0xFF, 0xFF));
+            res["DgSettingsNavSelectedForegroundBrush"] = CreateFrozenBrush(Color.FromRgb(0xFF, 0xFF, 0xFF));
+            res["DgSettingsNavSelectedBackgroundBrush"] = CreateFrozenBrush(Color.FromArgb(0x24, 0xFF, 0xFF, 0xFF));
+            res["DgSettingsTextPrimaryBrush"] = CreateFrozenBrush(Color.FromRgb(0xF3, 0xF4, 0xF6));
+            res["DgSettingsTextSecondaryBrush"] = CreateFrozenBrush(Color.FromRgb(0x9C, 0xA3, 0xAF));
+            res["DgSettingsCardBackgroundBrush"] = CreateFrozenBrush(Color.FromArgb(0x0D, 0xFF, 0xFF, 0xFF));
+            res["DgSettingsCardBorderBrush"] = CreateFrozenBrush(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
+            res["DgSettingsDividerBrush"] = CreateFrozenBrush(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
+            res["DgSettingsBadgeBackgroundBrush"] = CreateFrozenBrush(Color.FromArgb(0x38, 0x0A, 0x84, 0xFF));
+            res["DgSettingsBadgeForegroundBrush"] = CreateFrozenBrush(Color.FromRgb(0x6C, 0xD4, 0xFF));
         }
         else
         {
@@ -114,6 +132,20 @@ public static class ThemePalette
             res["DgAccentMutedBrush"] = CreateFrozenBrush(Color.FromArgb(0x2A, 0x0A, 0x84, 0xFF));
             res["DgPopupBrush"] = CreateFrozenBrush(Color.FromArgb(0xCC, 0xF4, 0xF6, 0xFA));
             res["DgDangerBrush"] = CreateFrozenBrush(Color.FromRgb(0xD9, 0x2D, 0x20));
+
+            // SettingsWindow dedicated high-contrast palette (Light Mode)
+            res["DgSettingsNavForegroundBrush"] = CreateFrozenBrush(Color.FromRgb(0x37, 0x41, 0x51));
+            res["DgSettingsNavHoverForegroundBrush"] = CreateFrozenBrush(Color.FromRgb(0x11, 0x18, 0x27));
+            res["DgSettingsNavHoverBackgroundBrush"] = CreateFrozenBrush(Color.FromArgb(0x0D, 0x00, 0x00, 0x00));
+            res["DgSettingsNavSelectedForegroundBrush"] = CreateFrozenBrush(Color.FromRgb(0x11, 0x18, 0x27));
+            res["DgSettingsNavSelectedBackgroundBrush"] = CreateFrozenBrush(Color.FromArgb(0x17, 0x00, 0x00, 0x00));
+            res["DgSettingsTextPrimaryBrush"] = CreateFrozenBrush(Color.FromRgb(0x11, 0x18, 0x27));
+            res["DgSettingsTextSecondaryBrush"] = CreateFrozenBrush(Color.FromRgb(0x4B, 0x55, 0x63));
+            res["DgSettingsCardBackgroundBrush"] = CreateFrozenBrush(Color.FromArgb(0x08, 0x00, 0x00, 0x00));
+            res["DgSettingsCardBorderBrush"] = CreateFrozenBrush(Color.FromArgb(0x1A, 0x00, 0x00, 0x00));
+            res["DgSettingsDividerBrush"] = CreateFrozenBrush(Color.FromArgb(0x1A, 0x00, 0x00, 0x00));
+            res["DgSettingsBadgeBackgroundBrush"] = CreateFrozenBrush(Color.FromArgb(0x1F, 0x0A, 0x84, 0xFF));
+            res["DgSettingsBadgeForegroundBrush"] = CreateFrozenBrush(Color.FromRgb(0x0A, 0x84, 0xFF));
         }
     }
 

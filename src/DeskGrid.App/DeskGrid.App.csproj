@@ -21,6 +21,9 @@
   </PropertyGroup>
   <ItemGroup>
     <Resource Include="Assets\app.ico" />
+    <Resource Include="Assets\app_256.png" />
+    <Resource Include="Assets\donate_wechat.png" Condition="Exists('Assets\donate_wechat.png')" />
+    <Resource Include="Assets\social_xhs.png" Condition="Exists('Assets\social_xhs.png')" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\DeskGrid.Core\DeskGrid.Core.csproj" />

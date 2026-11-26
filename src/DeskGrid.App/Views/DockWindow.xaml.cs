@@ -98,6 +98,13 @@ public partial class DockWindow : Window
         }
     }
 
+    public void ApplyMagnificationScale(double scale)
+    {
+        var clamped = Math.Clamp(scale, 1.05, 2.0);
+        PinnedPanel.MaxScale = clamped;
+        RunningPanel.MaxScale = clamped;
+    }
+
     public void ApplySettings()
     {
         PinnedPanel.EnableMagnification = _appConfig.Dock.EnableMagnification;

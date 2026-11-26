@@ -281,6 +281,7 @@ public partial class App : Application
                 _configService,
                 ApplyAllSettingsLive,
                 ApplyGlobalBoxOpacityLive,
+                ApplyDockMagnificationScaleLive,
                 ReplaceConfigAndReload,
                 EmergencyRestoreSystemState,
                 ShutdownSafely);
@@ -410,9 +411,18 @@ public partial class App : Application
             win.ApplyOpacity(clamped);
     }
 
+    private void ApplyDockMagnificationScaleLive(double scale)
+    {
+        var clamped = Math.Clamp(scale, 1.05, 2.0);
+        _config.Dock.MagnificationScale = clamped;
+        _dockWindow?.ApplyMagnificationScale(clamped);
+    }
+
     private void ApplyAllSettingsLive()
     {
         ThemePalette.ApplyToApplication(this, _config.Appearance.Theme);
+        if (_settingsWindow is { IsClosed: false })
+            _settingsWindow.ApplyThemeVisuals();
 
         foreach (var win in _boxWindows.Values)
             win.ApplyVisualSettings();

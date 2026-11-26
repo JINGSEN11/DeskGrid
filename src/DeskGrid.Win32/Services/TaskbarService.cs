@@ -75,6 +75,17 @@ public sealed class TaskbarService : ITaskbarService
         RestoreAppBarState(savedState);
         ShowAllTaskbars();
         BroadcastWorkAreaRefresh();
+
+        // Win11 Explorer may finish re-evaluating AppBar auto-hide state asynchronously; verify visibility once more.
+        var main = NativeMethods.FindWindow("Shell_TrayWnd", null);
+        if (main != 0 && !NativeMethods.IsWindowVisible(main))
+        {
+            Thread.Sleep(120);
+            RestoreAppBarState(savedState);
+            ShowAllTaskbars();
+            BroadcastWorkAreaRefresh();
+        }
+
         TryDeleteFile(primary);
         TryDeleteFile(legacy);
     }
@@ -394,6 +405,15 @@ public sealed class TaskbarService : ITaskbarService
                 NativeMethods.WM_SETTINGCHANGE,
                 (nint)NativeMethods.SPI_SETWORKAREA,
                 "TraySettings",
+                NativeMethods.SMTO_ABORTIFHUNG | NativeMethods.SMTO_NORMAL,
+                250,
+                out _);
+
+            NativeMethods.SendMessageTimeout(
+                NativeMethods.HWND_BROADCAST,
+                NativeMethods.WM_SETTINGCHANGE,
+                (nint)NativeMethods.SPI_SETWORKAREA,
+                null,
                 NativeMethods.SMTO_ABORTIFHUNG | NativeMethods.SMTO_NORMAL,
                 250,
                 out _);

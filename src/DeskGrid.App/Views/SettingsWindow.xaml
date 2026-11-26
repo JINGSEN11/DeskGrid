@@ -3,8 +3,9 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="DeskGrid 偏好设置"
         Icon="pack://application:,,,/Assets/app.ico"
-        Width="760"
-        Height="580"
+        Foreground="{DynamicResource DgSettingsTextPrimaryBrush}"
+        Width="780"
+        Height="620"
         MinWidth="680"
         MinHeight="500"
         ShowInTaskbar="True"
@@ -20,6 +21,7 @@
             <Setter Property="Margin" Value="0,0,0,4"/>
             <Setter Property="Padding" Value="12,0,12,0"/>
             <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="{DynamicResource DgSettingsNavForegroundBrush}"/>
             <Setter Property="BorderThickness" Value="0"/>
             <Setter Property="Cursor" Value="Hand"/>
             <Setter Property="HorizontalContentAlignment" Value="Left"/>
@@ -42,17 +44,35 @@
                                         Margin="-8,0,0,0"
                                         Background="#0A84FF"
                                         Visibility="Collapsed"/>
-                                <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
-                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
+                                <ContentPresenter x:Name="ContentSite"
+                                                  HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                                  VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                                                  TextElement.Foreground="{TemplateBinding Foreground}">
+                                    <ContentPresenter.Resources>
+                                        <Style TargetType="TextBlock">
+                                            <Setter Property="FontFamily" Value="{StaticResource DgUiFontFamily}"/>
+                                            <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"/>
+                                            <Setter Property="UseLayoutRounding" Value="True"/>
+                                            <Setter Property="SnapsToDevicePixels" Value="True"/>
+                                            <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
+                                            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
+                                        </Style>
+                                        <Style TargetType="Path">
+                                            <Setter Property="Fill" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"/>
+                                        </Style>
+                                    </ContentPresenter.Resources>
+                                </ContentPresenter>
                             </Grid>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#14808080"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource DgSettingsNavHoverBackgroundBrush}"/>
+                                <Setter Property="Foreground" Value="{DynamicResource DgSettingsNavHoverForegroundBrush}"/>
                             </Trigger>
                             <Trigger Property="IsChecked" Value="True">
-                                <Setter TargetName="Bd" Property="Background" Value="#22808080"/>
+                                <Setter TargetName="Bd" Property="Background" Value="{DynamicResource DgSettingsNavSelectedBackgroundBrush}"/>
                                 <Setter TargetName="ActivePill" Property="Visibility" Value="Visible"/>
+                                <Setter Property="Foreground" Value="{DynamicResource DgSettingsNavSelectedForegroundBrush}"/>
                                 <Setter Property="FontWeight" Value="SemiBold"/>
                             </Trigger>
                         </ControlTemplate.Triggers>
@@ -85,7 +105,14 @@
                                 SnapsToDevicePixels="True">
                             <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
                                               VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+                                              TextElement.Foreground="{TemplateBinding Foreground}">
+                                <ContentPresenter.Resources>
+                                    <Style TargetType="TextBlock">
+                                        <Setter Property="FontFamily" Value="{StaticResource DgUiFontFamily}"/>
+                                        <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}"/>
+                                    </Style>
+                                </ContentPresenter.Resources>
+                            </ContentPresenter>
                         </Border>
                         <ControlTemplate.Triggers>
                             <Trigger Property="IsMouseOver" Value="True">
@@ -111,7 +138,9 @@
 
         <StackPanel Grid.Row="0" Margin="0,0,0,14">
             <TextBlock Text="DeskGrid 设置" FontSize="22" FontWeight="SemiBold"/>
-            <TextBlock Text="自定义桌面盒子、Dock 栏与系统协同行为" Opacity="0.72" Margin="0,2,0,0"/>
+            <TextBlock Text="自定义桌面盒子、Dock 栏与系统协同行为"
+                       Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
+                       Margin="0,2,0,0"/>
         </StackPanel>
 
         <Grid Grid.Row="1">
@@ -129,6 +158,19 @@
                 </Grid.RowDefinitions>
 
                 <StackPanel Grid.Row="0">
+                    <StackPanel.Resources>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="FontFamily" Value="{StaticResource DgUiFontFamily}"/>
+                            <Setter Property="Foreground" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"/>
+                            <Setter Property="UseLayoutRounding" Value="True"/>
+                            <Setter Property="SnapsToDevicePixels" Value="True"/>
+                            <Setter Property="TextOptions.TextFormattingMode" Value="Ideal"/>
+                            <Setter Property="TextOptions.TextRenderingMode" Value="ClearType"/>
+                        </Style>
+                        <Style TargetType="Path">
+                            <Setter Property="Fill" Value="{Binding Foreground, RelativeSource={RelativeSource AncestorType=RadioButton}}"/>
+                        </Style>
+                    </StackPanel.Resources>
                     <RadioButton x:Name="NavAppearanceRadio"
                                  GroupName="SettingsNav"
                                  Style="{StaticResource DgSettingsNavRadioStyle}"
@@ -179,15 +221,15 @@
                             ToolTip="恢复原生任务栏与桌面图标并安全退出 DeskGrid"
                             Click="OnSafeExit">
                         <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                            <TextBlock Text="&#xE7E8;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14" VerticalAlignment="Center" Margin="0,0,10,0"/>
-                            <TextBlock Text="安全退出" VerticalAlignment="Center"/>
+                            <TextBlock Text="&#xE7E8;" FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets" FontSize="14" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" VerticalAlignment="Center" Margin="0,0,10,0"/>
+                            <TextBlock Text="安全退出" Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=Button}}" VerticalAlignment="Center"/>
                         </StackPanel>
                     </Button>
                 </StackPanel>
             </Grid>
 
             <!-- Subtle vertical divider -->
-            <Border Grid.Column="1" Background="#24808080"/>
+            <Border Grid.Column="1" Background="{DynamicResource DgSettingsDividerBrush}"/>
 
             <!-- Right Content Sections -->
             <Grid Grid.Column="2" Margin="14,0,0,0">
@@ -195,6 +237,7 @@
                 <ScrollViewer x:Name="AppearanceSection"
                               VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled"
+                              PanningMode="VerticalOnly"
                               CanContentScroll="False"
                               Padding="6,4,10,4">
                     <StackPanel>
@@ -238,6 +281,7 @@
                                     SmallChange="0.01"
                                     LargeChange="0.05"
                                     TickFrequency="0.01"
+                                    ScrollViewer.PanningMode="None"
                                     IsSnapToTickEnabled="False"
                                     IsMoveToPointEnabled="True"
                                     ValueChanged="OnOpacitySliderValueChanged"/>
@@ -258,6 +302,7 @@
                               Visibility="Collapsed"
                               VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled"
+                              PanningMode="VerticalOnly"
                               CanContentScroll="False"
                               Padding="6,4,10,4">
                     <StackPanel>
@@ -281,9 +326,10 @@
                                         SmallChange="0.01"
                                         LargeChange="0.05"
                                         TickFrequency="0.01"
+                                        ScrollViewer.PanningMode="None"
                                         IsSnapToTickEnabled="False"
                                         IsMoveToPointEnabled="True"
-                                        ValueChanged="OnSettingChanged"/>
+                                        ValueChanged="OnMagScaleSliderValueChanged"/>
                                 <TextBlock x:Name="MagScaleValueText" Grid.Column="2" VerticalAlignment="Center" HorizontalAlignment="Right"/>
                             </Grid>
 
@@ -295,13 +341,13 @@
                             <TextBlock x:Name="TaskbarUncheckedHintText"
                                        Text="提示：未开启隐藏原生任务栏时，Dock 会自动悬浮在原生任务栏上方，互不遮挡。"
                                        FontSize="12"
-                                       Opacity="0.68"
+                                       Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
                                        TextWrapping="Wrap"
                                        Margin="24,0,0,4"/>
                             <TextBlock x:Name="TaskbarCheckedHintText"
                                        Text="已开启原生任务栏隐藏，退出 DeskGrid 或异常终止时将自动恢复；也可随时点击 Dock 齿轮菜单恢复。"
                                        FontSize="12"
-                                       Opacity="0.78"
+                                       Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
                                        TextWrapping="Wrap"
                                        Visibility="Collapsed"
                                        Margin="24,0,0,4"/>
@@ -324,13 +370,14 @@
                               Visibility="Collapsed"
                               VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled"
+                              PanningMode="VerticalOnly"
                               CanContentScroll="False"
                               Padding="6,4,10,4">
                     <StackPanel>
                         <TextBlock Text="配置导入导出与恢复" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,6"/>
                         <TextBlock Text="所有桌面盒子布局、虚拟条目与 Dock 固定项均以 JSON 保存在本地，并自动维护 3 份滚动备份。"
                                    TextWrapping="Wrap"
-                                   Opacity="0.75"
+                                   Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
                                    Margin="0,0,0,16"/>
 
                         <WrapPanel Margin="0,0,0,16">
@@ -353,30 +400,165 @@
                               Visibility="Collapsed"
                               VerticalScrollBarVisibility="Auto"
                               HorizontalScrollBarVisibility="Disabled"
+                              PanningMode="VerticalOnly"
                               CanContentScroll="False"
-                              Padding="6,4,10,4">
+                              Padding="6,4,10,8">
                     <StackPanel>
-                        <TextBlock Text="DeskGrid 桌面整理助手" FontSize="16" FontWeight="SemiBold" Margin="0,0,0,4"/>
-                        <TextBlock Text="版本 v0.2.0 · 开源轻量 Windows 桌面分区收纳与 Fluent Dock 栏"
-                                   Opacity="0.75"
-                                   Margin="0,0,0,16"/>
+                        <!-- Card 1: 软件信息与版权声明 -->
+                        <Border Background="{DynamicResource DgSettingsCardBackgroundBrush}"
+                                BorderBrush="{DynamicResource DgSettingsCardBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="18,16"
+                                Margin="0,0,0,14">
+                            <StackPanel>
+                                <Grid Margin="0,0,0,12">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto"/>
+                                        <ColumnDefinition Width="*"/>
+                                    </Grid.ColumnDefinitions>
 
-                        <Separator Margin="0,0,0,14"/>
-                        <TextBlock Text="安全守护与退出方式" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                        <TextBlock Text="• 开启「自动隐藏系统任务栏」后，内置独立看门狗进程守护主程序，即使在任务管理器中强杀也会自动恢复主副屏任务栏。"
-                                   TextWrapping="Wrap"
-                                   Opacity="0.82"
-                                   Margin="0,0,0,6"/>
-                        <TextBlock Text="• 任何时候均可通过左下角「安全退出」按钮、Dock 齿轮菜单、系统托盘菜单或桌面盒子右键菜单安全退出并完整恢复系统状态。"
-                                   TextWrapping="Wrap"
-                                   Opacity="0.82"
-                                   Margin="0,0,0,16"/>
+                                    <Border Width="56"
+                                            Height="56"
+                                            CornerRadius="12"
+                                            Margin="0,0,14,0"
+                                            VerticalAlignment="Center"
+                                            ClipToBounds="True">
+                                        <Image x:Name="AboutAppIcon"
+                                               Width="56"
+                                               Height="56"
+                                               Stretch="UniformToFill"
+                                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                                    </Border>
 
-                        <Separator Margin="0,0,0,14"/>
-                        <TextBlock Text="快捷操作提示" FontSize="14" FontWeight="SemiBold" Margin="0,0,0,8"/>
-                        <TextBlock Text="• 双击桌面空白处：一键隐藏 / 恢复所有桌面盒子" Opacity="0.82" Margin="0,0,0,4"/>
-                        <TextBlock Text="• 点击 Dock 右侧时钟：弹出快捷电源控制面板（锁屏 / 睡眠 / 重启 / 关机）" Opacity="0.82" Margin="0,0,0,4"/>
-                        <TextBlock Text="• 选中盒子内图标按 F2 / Del / Esc：重命名、移除/删除或取消选中" Opacity="0.82" Margin="0,0,0,4"/>
+                                    <StackPanel Grid.Column="1" VerticalAlignment="Center">
+                                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                            <TextBlock Text="DeskGrid（桌格）"
+                                                       FontSize="17"
+                                                       FontWeight="SemiBold"
+                                                       VerticalAlignment="Center"/>
+                                            <Border Background="{DynamicResource DgSettingsBadgeBackgroundBrush}"
+                                                    CornerRadius="6"
+                                                    Padding="8,2"
+                                                    Margin="10,0,0,0"
+                                                    VerticalAlignment="Center">
+                                                <TextBlock Text="v0.2.0"
+                                                           FontSize="11.5"
+                                                           FontWeight="SemiBold"
+                                                           Foreground="{DynamicResource DgSettingsBadgeForegroundBrush}"/>
+                                            </Border>
+                                        </StackPanel>
+                                        <TextBlock Text="轻量级 Windows 液态毛玻璃桌面整理与悬浮 Dock 工具"
+                                                   FontSize="13"
+                                                   Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
+                                                   TextWrapping="Wrap"
+                                                   Margin="0,4,0,0"/>
+                                    </StackPanel>
+                                </Grid>
+
+                                <Border Height="1" Background="{DynamicResource DgSettingsDividerBrush}" Margin="0,2,0,12"/>
+
+                                <TextBlock Text="Copyright © 2026 Jens (JINGSEN11). All Rights Reserved."
+                                           FontSize="12.5"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,0,6"/>
+                                <TextBlock FontSize="12.5"
+                                           Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
+                                           TextWrapping="Wrap"
+                                           LineHeight="20"
+                                           Margin="0,0,0,4">
+                                    <Run Text="本软件基于 "/>
+                                    <Run Text="MIT License" FontWeight="SemiBold" Foreground="{DynamicResource DgSettingsTextPrimaryBrush}"/>
+                                    <Run Text=" 开源发布，纯免费、无广告、无后台联网收集。"/>
+                                </TextBlock>
+                                <TextBlock Text="严禁任何第三方将本软件二次打包进行商业售卖或捆绑推广；二次分发请保留原作者署名与开源仓库地址。"
+                                           FontSize="12.5"
+                                           Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
+                                           TextWrapping="Wrap"
+                                           LineHeight="20"
+                                           Margin="0,0,0,14"/>
+
+                                <Button Content="访问 GitHub 开源主页"
+                                        HorizontalAlignment="Left"
+                                        Height="34"
+                                        Padding="16,0"
+                                        Cursor="Hand"
+                                        Click="OnOpenGitHub"/>
+                            </StackPanel>
+                        </Border>
+
+                        <!-- Card 2: 支持与关注（微信赞赏 & 小红书双二维码通道） -->
+                        <Border x:Name="SupportQrCard"
+                                Background="{DynamicResource DgSettingsCardBackgroundBrush}"
+                                BorderBrush="{DynamicResource DgSettingsCardBorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="18,16">
+                            <StackPanel>
+                                <TextBlock Text="支持与关注"
+                                           FontSize="15"
+                                           FontWeight="SemiBold"
+                                           Margin="0,0,0,6"/>
+                                <TextBlock Text="DeskGrid 由独立开发者利用课余时间维护。如果这个小工具让你的桌面变得更顺眼、更顺手，欢迎请我喝杯咖啡，或扫码关注小红书追更后续版本与反馈建议！"
+                                           FontSize="12.5"
+                                           Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
+                                           TextWrapping="Wrap"
+                                           LineHeight="20"
+                                           Margin="0,0,0,16"/>
+
+                                <StackPanel x:Name="QrCardsContainer"
+                                            Orientation="Horizontal"
+                                            HorizontalAlignment="Center">
+                                    <!-- 左侧：微信赞赏 -->
+                                    <StackPanel x:Name="WechatQrCard" HorizontalAlignment="Center" Width="184">
+                                        <Border Background="#FFFFFF"
+                                                CornerRadius="12"
+                                                Padding="8"
+                                                HorizontalAlignment="Center">
+                                            <Image x:Name="WechatQrImage"
+                                                   Width="150"
+                                                   Height="150"
+                                                   Stretch="Uniform"
+                                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        </Border>
+                                        <TextBlock Text="请我喝杯咖啡 ☕"
+                                                   FontSize="13.5"
+                                                   FontWeight="SemiBold"
+                                                   HorizontalAlignment="Center"
+                                                   Margin="0,10,0,2"/>
+                                        <TextBlock Text="自愿赞赏 · 支持持续更新"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
+                                                   HorizontalAlignment="Center"/>
+                                    </StackPanel>
+
+                                    <Border x:Name="QrSpacer" Width="28"/>
+
+                                    <!-- 右侧：小红书主页 -->
+                                    <StackPanel x:Name="XhsQrCard" HorizontalAlignment="Center" Width="184">
+                                        <Border Background="#FFFFFF"
+                                                CornerRadius="12"
+                                                Padding="8"
+                                                HorizontalAlignment="Center">
+                                            <Image x:Name="XhsQrImage"
+                                                   Width="150"
+                                                   Height="150"
+                                                   Stretch="Uniform"
+                                                   RenderOptions.BitmapScalingMode="HighQuality"/>
+                                        </Border>
+                                        <TextBlock Text="关注小红书 @Coldie."
+                                                   FontSize="13.5"
+                                                   FontWeight="SemiBold"
+                                                   HorizontalAlignment="Center"
+                                                   Margin="0,10,0,2"/>
+                                        <TextBlock Text="追更版本动态 · 进群反馈 Bug"
+                                                   FontSize="12"
+                                                   Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
+                                                   HorizontalAlignment="Center"/>
+                                    </StackPanel>
+                                </StackPanel>
+                            </StackPanel>
+                        </Border>
                     </StackPanel>
                 </ScrollViewer>
             </Grid>

@@ -1,25 +1,33 @@
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Interop;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
+using DeskGrid.App.Helpers;
 using DeskGrid.Core.Models;
 using DeskGrid.Core.Services;
+using DeskGrid.Win32.Services;
 using Microsoft.Win32;
 
 namespace DeskGrid.App.Views;
 
 public partial class SettingsWindow : Window
 {
+    private const string GitHubRepoUrl = "https://github.com/JINGSEN11/DeskGrid";
+
     private readonly AppConfig _config;
     private readonly ConfigService _configService;
     private readonly Action _onSettingsApplied;
     private readonly Action<double> _onGlobalBoxOpacityChanged;
+    private readonly Action<double> _onDockMagnificationScaleChanged;
     private readonly Action<AppConfig> _onConfigReplaced;
     private readonly Action _onEmergencyRestore;
     private readonly Action _onSafeExit;
-    private readonly DispatcherTimer _opacitySaveDebounceTimer;
-    private bool _hasPendingOpacitySave;
+    private readonly DispatcherTimer _sliderSaveDebounceTimer;
+    private bool _hasPendingSliderSave;
     private bool _loading = true;
 
     public bool IsClosed { get; private set; }
@@ -29,6 +37,7 @@ public partial class SettingsWindow : Window
         ConfigService configService,
         Action onSettingsApplied,
         Action<double> onGlobalBoxOpacityChanged,
+        Action<double> onDockMagnificationScaleChanged,
         Action<AppConfig> onConfigReplaced,
         Action onEmergencyRestore,
         Action onSafeExit)
@@ -37,22 +46,55 @@ public partial class SettingsWindow : Window
         _configService = configService ?? throw new ArgumentNullException(nameof(configService));
         _onSettingsApplied = onSettingsApplied ?? throw new ArgumentNullException(nameof(onSettingsApplied));
         _onGlobalBoxOpacityChanged = onGlobalBoxOpacityChanged ?? throw new ArgumentNullException(nameof(onGlobalBoxOpacityChanged));
+        _onDockMagnificationScaleChanged = onDockMagnificationScaleChanged ?? throw new ArgumentNullException(nameof(onDockMagnificationScaleChanged));
         _onConfigReplaced = onConfigReplaced ?? throw new ArgumentNullException(nameof(onConfigReplaced));
         _onEmergencyRestore = onEmergencyRestore ?? throw new ArgumentNullException(nameof(onEmergencyRestore));
         _onSafeExit = onSafeExit ?? throw new ArgumentNullException(nameof(onSafeExit));
 
         EnsureConfigSections();
 
-        _opacitySaveDebounceTimer = new DispatcherTimer
+        _sliderSaveDebounceTimer = new DispatcherTimer
         {
             Interval = TimeSpan.FromMilliseconds(220)
         };
-        _opacitySaveDebounceTimer.Tick += (_, _) => FlushPendingOpacitySave();
+        _sliderSaveDebounceTimer.Tick += (_, _) => FlushPendingSliderSave();
 
         InitializeComponent();
 
+        SourceInitialized += (_, _) => ApplyThemeVisuals();
+        Loaded += (_, _) => ApplyThemeVisuals();
+
+        LoadAboutAssets();
         LoadControlsFromConfig();
+        ApplyThemeVisuals();
         _loading = false;
+    }
+
+    public void ApplyThemeVisuals()
+    {
+        if (IsClosed)
+            return;
+
+        EnsureConfigSections();
+        var themePref = _config.Appearance.Theme;
+        var targetThemeMode = ThemePalette.ToWpfThemeMode(themePref);
+        if (ThemeMode != targetThemeMode)
+            ThemeMode = targetThemeMode;
+
+        var isDark = ThemePalette.IsDarkMode(themePref);
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd != 0)
+        {
+            DwmBackdropService.ApplyWindowChrome(
+                hwnd,
+                _config.Appearance.Backdrop,
+                isDark,
+                roundedCorners: true,
+                applySystemBackdrop: false);
+        }
+
+        SetResourceReference(ForegroundProperty, "DgSettingsTextPrimaryBrush");
+        InvalidateVisual();
     }
 
     public void SyncFromConfig()
@@ -64,6 +106,7 @@ public partial class SettingsWindow : Window
         try
         {
             LoadControlsFromConfig();
+            ApplyThemeVisuals();
         }
         finally
         {
@@ -78,6 +121,78 @@ public partial class SettingsWindow : Window
         _config.Dock ??= new DockConfig();
         _config.Dock.PinnedItems ??= [];
         _config.Boxes ??= [];
+    }
+
+    private void LoadAboutAssets()
+    {
+        var appIcon = TryLoadAssetImage("app_256.png");
+        if (appIcon is not null && AboutAppIcon is not null)
+            AboutAppIcon.Source = appIcon;
+
+        var wechatQr = TryLoadAssetImage("donate_wechat.png");
+        var xhsQr = TryLoadAssetImage("social_xhs.png");
+
+        var hasWechat = wechatQr is not null;
+        var hasXhs = xhsQr is not null;
+
+        if (WechatQrImage is not null)
+            WechatQrImage.Source = wechatQr;
+        if (XhsQrImage is not null)
+            XhsQrImage.Source = xhsQr;
+
+        if (WechatQrCard is not null)
+            WechatQrCard.Visibility = hasWechat ? Visibility.Visible : Visibility.Collapsed;
+        if (XhsQrCard is not null)
+            XhsQrCard.Visibility = hasXhs ? Visibility.Visible : Visibility.Collapsed;
+        if (QrSpacer is not null)
+            QrSpacer.Visibility = (hasWechat && hasXhs) ? Visibility.Visible : Visibility.Collapsed;
+        if (QrCardsContainer is not null)
+            QrCardsContainer.Visibility = (hasWechat || hasXhs) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private static BitmapImage? TryLoadAssetImage(string fileName)
+    {
+        try
+        {
+            var packUri = new Uri($"pack://application:,,,/Assets/{fileName}", UriKind.Absolute);
+            var streamInfo = Application.GetResourceStream(packUri);
+            if (streamInfo?.Stream is not null)
+            {
+                using var stream = streamInfo.Stream;
+                var bmp = new BitmapImage();
+                bmp.BeginInit();
+                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                bmp.StreamSource = stream;
+                bmp.EndInit();
+                bmp.Freeze();
+                return bmp;
+            }
+        }
+        catch
+        {
+            // Resource not embedded; fall through to disk lookup
+        }
+
+        try
+        {
+            var diskPath = Path.Combine(AppContext.BaseDirectory, "Assets", fileName);
+            if (File.Exists(diskPath))
+            {
+                var bmp = new BitmapImage();
+                bmp.BeginInit();
+                bmp.CacheOption = BitmapCacheOption.OnLoad;
+                bmp.UriSource = new Uri(diskPath, UriKind.Absolute);
+                bmp.EndInit();
+                bmp.Freeze();
+                return bmp;
+            }
+        }
+        catch
+        {
+            // Gracefully ignore missing or unreadable image
+        }
+
+        return null;
     }
 
     private void LoadControlsFromConfig()
@@ -143,19 +258,38 @@ public partial class SettingsWindow : Window
         // Immediately sync background brush opacity across all currently open DesktopBoxWindow instances
         _onGlobalBoxOpacityChanged(opacity);
 
-        // Debounce disk persistence while continuously dragging the slider
-        _hasPendingOpacitySave = true;
-        _opacitySaveDebounceTimer.Stop();
-        _opacitySaveDebounceTimer.Start();
+        ScheduleDebouncedSliderSave();
     }
 
-    private void FlushPendingOpacitySave()
+    private void OnMagScaleSliderValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
     {
-        _opacitySaveDebounceTimer?.Stop();
-        if (!_hasPendingOpacitySave)
+        if (_loading || !IsInitialized) return;
+        EnsureConfigSections();
+
+        var scale = Math.Round(MagScaleSlider.Value, 2);
+        _config.Dock.MagnificationScale = scale;
+        MagScaleValueText.Text = $"{scale:0.00}x";
+
+        // Lightweight live update without re-templating SettingsWindow or dropping Slider mouse capture
+        _onDockMagnificationScaleChanged(scale);
+
+        ScheduleDebouncedSliderSave();
+    }
+
+    private void ScheduleDebouncedSliderSave()
+    {
+        _hasPendingSliderSave = true;
+        _sliderSaveDebounceTimer.Stop();
+        _sliderSaveDebounceTimer.Start();
+    }
+
+    private void FlushPendingSliderSave()
+    {
+        _sliderSaveDebounceTimer?.Stop();
+        if (!_hasPendingSliderSave)
             return;
 
-        _hasPendingOpacitySave = false;
+        _hasPendingSliderSave = false;
         _configService.Save(_config);
     }
 
@@ -196,15 +330,33 @@ public partial class SettingsWindow : Window
         _config.Dock.ClockShowSeconds = ClockShowSecondsCheck.IsChecked == true;
         _config.Dock.ClockShowDate = ClockShowDateCheck.IsChecked == true;
 
-        _opacitySaveDebounceTimer.Stop();
-        _hasPendingOpacitySave = false;
+        _sliderSaveDebounceTimer.Stop();
+        _hasPendingSliderSave = false;
         _configService.Save(_config);
         _onSettingsApplied();
+        ApplyThemeVisuals();
+    }
+
+    private void OnOpenGitHub(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = GitHubRepoUrl,
+                UseShellExecute = true
+            });
+        }
+        catch (Exception ex)
+        {
+            Trace.WriteLine($"[DeskGrid] Failed to open GitHub URL: {ex}");
+            MessageBox.Show(this, $"无法打开浏览器：{ex.Message}", "DeskGrid", MessageBoxButton.OK, MessageBoxImage.Warning);
+        }
     }
 
     private void OnExportConfig(object sender, RoutedEventArgs e)
     {
-        FlushPendingOpacitySave();
+        FlushPendingSliderSave();
         var dlg = new SaveFileDialog
         {
             Title = "导出 DeskGrid 配置",
@@ -228,8 +380,8 @@ public partial class SettingsWindow : Window
 
     private void OnImportConfig(object sender, RoutedEventArgs e)
     {
-        _opacitySaveDebounceTimer.Stop();
-        _hasPendingOpacitySave = false;
+        _sliderSaveDebounceTimer.Stop();
+        _hasPendingSliderSave = false;
         var dlg = new OpenFileDialog
         {
             Title = "导入 DeskGrid 配置",
@@ -277,8 +429,8 @@ public partial class SettingsWindow : Window
         UpdateTaskbarHintVisibility(false);
         _loading = false;
 
-        _opacitySaveDebounceTimer.Stop();
-        _hasPendingOpacitySave = false;
+        _sliderSaveDebounceTimer.Stop();
+        _hasPendingSliderSave = false;
         _configService.Save(_config);
         _onEmergencyRestore();
         MessageBox.Show(this, "已恢复系统任务栏与原生桌面图标显示。", "DeskGrid", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -295,8 +447,8 @@ public partial class SettingsWindow : Window
 
         if (confirm == MessageBoxResult.Yes)
         {
-            _opacitySaveDebounceTimer.Stop();
-            _hasPendingOpacitySave = false;
+            _sliderSaveDebounceTimer.Stop();
+            _hasPendingSliderSave = false;
             var fresh = FirstRunInitializer.CreateDefaultConfig(SystemParameters.WorkArea.Width, SystemParameters.WorkArea.Height);
             _configService.Save(fresh);
             _onConfigReplaced(fresh);
@@ -317,16 +469,16 @@ public partial class SettingsWindow : Window
 
     private void OnSafeExit(object sender, RoutedEventArgs e)
     {
-        FlushPendingOpacitySave();
+        FlushPendingSliderSave();
         _onSafeExit();
     }
 
-    private void OnWindowClosing(object? sender, CancelEventArgs e) => FlushPendingOpacitySave();
+    private void OnWindowClosing(object? sender, CancelEventArgs e) => FlushPendingSliderSave();
 
     protected override void OnClosed(EventArgs e)
     {
         IsClosed = true;
-        _opacitySaveDebounceTimer?.Stop();
+        _sliderSaveDebounceTimer?.Stop();
         base.OnClosed(e);
     }
 
