@@ -126,6 +126,13 @@ public partial class DesktopBoxWindow : Window
             RefreshItems();
     }
 
+    public void ApplyOpacity(double opacity)
+    {
+        _box.Opacity = Math.Clamp(opacity, 0.15, 0.90);
+        var dark = ThemePalette.IsDarkMode(_appConfig.Appearance.Theme);
+        ShadowBackdrop.Background = ThemePalette.CreateTintedSurfaceBrush(dark, _box.Opacity);
+    }
+
     public void ApplyVisualSettings()
     {
         var dark = ThemePalette.IsDarkMode(_appConfig.Appearance.Theme);

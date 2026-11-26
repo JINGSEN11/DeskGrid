@@ -249,4 +249,47 @@ public sealed class DockManagerTests
         AssertEx.Equal(0, DragReorderCalculator.ResolveTargetIndex(3, 0, 4)); // drag left to head
         AssertEx.Equal(1, DragReorderCalculator.ResolveTargetIndex(3, 1, 4)); // drag left before 1
     }
+
+    [TestFact]
+    public void DockClockFormatter_Formats24Hour12HourSecondsDateAndTooltip()
+    {
+        var sample = new DateTime(2026, 11, 25, 21, 5, 9);
+
+        AssertEx.Equal("21:05", DockClockFormatter.FormatTime(sample, use24Hour: true, showSeconds: false));
+        AssertEx.Equal("21:05:09", DockClockFormatter.FormatTime(sample, use24Hour: true, showSeconds: true));
+        AssertEx.Equal("9:05 PM", DockClockFormatter.FormatTime(sample, use24Hour: false, showSeconds: false));
+        AssertEx.Equal("9:05:09 PM", DockClockFormatter.FormatTime(sample, use24Hour: false, showSeconds: true));
+
+        var dateText = DockClockFormatter.FormatDate(sample);
+        AssertEx.True(dateText.StartsWith("11月25日 ", StringComparison.Ordinal), $"Unexpected date format: {dateText}");
+
+        var tooltip = DockClockFormatter.FormatTooltip(sample, use24Hour: true);
+        AssertEx.True(tooltip.Contains("2026年11月25日", StringComparison.Ordinal) && tooltip.Contains("21:05:09", StringComparison.Ordinal),
+            $"Unexpected tooltip format: {tooltip}");
+    }
+
+    [TestFact]
+    public void PinItem_DeduplicatesTrailingSlashesCaseAndResolvedTarget()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "DeskGridTests_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var cfgSvc = new ConfigService(tempDir);
+            var cfg = new AppConfig();
+            var mgr = new DockManager(cfg, cfgSvc);
+
+            AssertEx.True(mgr.PinItem(@"C:\Apps\Code.lnk", "VS Code", @"C:\Apps\Code.exe"));
+            AssertEx.False(mgr.PinItem(@"c:\apps\code.lnk", "VS Code", @"C:\Apps\Code.exe"));
+            AssertEx.False(mgr.PinItem(@"C:\Apps\Code.exe", "VS Code"));
+
+            AssertEx.True(mgr.PinItem(@"C:\Work\Docs\"));
+            AssertEx.False(mgr.PinItem(@"c:/work/docs"));
+            AssertEx.Equal(2, cfg.Dock.PinnedItems.Count);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+                Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }

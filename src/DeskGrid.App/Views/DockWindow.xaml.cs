@@ -1,13 +1,16 @@
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
+using System.Windows.Threading;
 using DeskGrid.App.Controls;
 using DeskGrid.App.Helpers;
 using DeskGrid.Core.Abstractions;
 using DeskGrid.Core.Models;
 using DeskGrid.Core.Services;
 using DeskGrid.Win32.Services;
+using Microsoft.Win32;
 
 namespace DeskGrid.App.Views;
 
@@ -22,6 +25,11 @@ public partial class DockWindow : Window
     private readonly Action _onToggleBoxes;
     private readonly Action _onCreateBox;
     private readonly Action _onOpenSettings;
+
+    private readonly DispatcherTimer _clockTimer;
+    private string _lastClockTimeText = string.Empty;
+    private string _lastClockDateText = string.Empty;
+    private string _lastClockTooltipText = string.Empty;
 
     private WindowListPopup? _activePopup;
     private Point _dragStartPoint;
@@ -53,6 +61,12 @@ public partial class DockWindow : Window
         _onCreateBox = onCreateBox;
         _onOpenSettings = onOpenSettings;
 
+        _clockTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromSeconds(1)
+        };
+        _clockTimer.Tick += (_, _) => UpdateClockDisplay(force: false);
+
         SourceInitialized += (_, _) => DesktopHostService.ConfigureFloatingDockWindow(this);
         Loaded += (_, _) =>
         {
@@ -62,6 +76,7 @@ public partial class DockWindow : Window
         };
         ContentRendered += (_, _) => RepositionDock();
         SizeChanged += (_, _) => RepositionDock();
+        Closed += (_, _) => _clockTimer.Stop();
     }
 
     protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
@@ -90,8 +105,59 @@ public partial class DockWindow : Window
             RunningPanel.SmoothResetScales();
         }
 
+        ApplyClockSettings();
         UpdateQuickToolStates();
         RepositionDock();
+    }
+
+    private void ApplyClockSettings()
+    {
+        var showClock = _appConfig.Dock.ShowDockClock;
+        var vis = showClock ? Visibility.Visible : Visibility.Collapsed;
+        ClockDivider.Visibility = vis;
+        DockClockButton.Visibility = vis;
+
+        if (showClock)
+        {
+            ClockDateText.Visibility = _appConfig.Dock.ClockShowDate ? Visibility.Visible : Visibility.Collapsed;
+            UpdateClockDisplay(force: true);
+            if (!_clockTimer.IsEnabled)
+                _clockTimer.Start();
+        }
+        else
+        {
+            _clockTimer.Stop();
+            PowerMenuPopup.IsOpen = false;
+        }
+    }
+
+    private void UpdateClockDisplay(bool force)
+    {
+        if (!_appConfig.Dock.ShowDockClock)
+            return;
+
+        var now = DateTime.Now;
+        var timeText = DockClockFormatter.FormatTime(now, _appConfig.Dock.ClockUse24Hour, _appConfig.Dock.ClockShowSeconds);
+        var dateText = DockClockFormatter.FormatDate(now);
+        var tooltipText = DockClockFormatter.FormatTooltip(now, _appConfig.Dock.ClockUse24Hour);
+
+        if (force || !string.Equals(_lastClockTimeText, timeText, StringComparison.Ordinal))
+        {
+            _lastClockTimeText = timeText;
+            ClockTimeText.Text = timeText;
+        }
+
+        if (force || !string.Equals(_lastClockDateText, dateText, StringComparison.Ordinal))
+        {
+            _lastClockDateText = dateText;
+            ClockDateText.Text = dateText;
+        }
+
+        if (force || !string.Equals(_lastClockTooltipText, tooltipText, StringComparison.Ordinal))
+        {
+            _lastClockTooltipText = tooltipText;
+            DockClockButton.ToolTip = tooltipText;
+        }
     }
 
     public void UpdateQuickToolStates()
@@ -230,12 +296,15 @@ public partial class DockWindow : Window
         else if (!IsVisible)
         {
             Show();
+            ApplyClockSettings();
             RepositionDock();
         }
     }
 
     public void HideDock()
     {
+        _clockTimer.Stop();
+        PowerMenuPopup.IsOpen = false;
         try { _activePopup?.Close(); } catch { }
         _activePopup = null;
         if (IsVisible)
@@ -490,6 +559,7 @@ public partial class DockWindow : Window
 
     private void HandleSlotClick(DockSlotItem slot, FrameworkElement anchor)
     {
+        PowerMenuPopup.IsOpen = false;
         var decision = DockManager.DecideClickAction(slot);
         switch (decision.Action)
         {
@@ -517,6 +587,7 @@ public partial class DockWindow : Window
 
     private void ShowMultiWindowPopup(DockSlotItem slot, FrameworkElement anchor)
     {
+        PowerMenuPopup.IsOpen = false;
         PinnedPanel.SmoothResetScales();
         RunningPanel.SmoothResetScales();
         try { _activePopup?.Close(); } catch { }
@@ -541,18 +612,86 @@ public partial class DockWindow : Window
         popup.Show();
     }
 
+    private void OnDockBackgroundRightClick(object sender, MouseButtonEventArgs e)
+    {
+        PowerMenuPopup.IsOpen = false;
+        PinnedPanel.SmoothResetScales();
+        RunningPanel.SmoothResetScales();
+
+        var menu = ThemePalette.CreateThemedContextMenu();
+        menu.Placement = PlacementMode.MousePoint;
+
+        var addPinnedMi = new MenuItem { Header = "添加固定应用..." };
+        addPinnedMi.Click += (_, _) => PromptAddPinnedApps();
+        menu.Items.Add(addPinnedMi);
+
+        menu.Items.Add(new Separator());
+
+        var newBoxMi = new MenuItem { Header = "新建桌面盒子..." };
+        newBoxMi.Click += (_, _) => _onCreateBox();
+        menu.Items.Add(newBoxMi);
+
+        var settingsMi = new MenuItem { Header = "偏好设置..." };
+        settingsMi.Click += (_, _) => _onOpenSettings();
+        menu.Items.Add(settingsMi);
+
+        menu.PlacementTarget = DockPill;
+        menu.IsOpen = true;
+        e.Handled = true;
+    }
+
+    private void PromptAddPinnedApps()
+    {
+        var dlg = new OpenFileDialog
+        {
+            Title = "选择要固定到 Dock 栏的应用或快捷方式",
+            Filter = "应用程序与快捷方式 (*.exe;*.lnk)|*.exe;*.lnk|所有文件 (*.*)|*.*",
+            Multiselect = true,
+            DereferenceLinks = false
+        };
+
+        if (dlg.ShowDialog() == true)
+        {
+            var pinnedAny = false;
+            foreach (var file in dlg.FileNames)
+            {
+                if (PinDroppedOrSelectedPath(file, displayName: null))
+                    pinnedAny = true;
+            }
+
+            if (pinnedAny)
+                RefreshDock();
+        }
+    }
+
+    private bool PinDroppedOrSelectedPath(string path, string? displayName)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        var resolved = path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase)
+            ? _shellService.ResolveShortcutTarget(path)
+            : null;
+        return _dockManager.PinItem(path, displayName, resolved);
+    }
+
     private void ShowSlotContextMenu(DockSlotItem slot, FrameworkElement target)
     {
+        PowerMenuPopup.IsOpen = false;
         PinnedPanel.SmoothResetScales();
         RunningPanel.SmoothResetScales();
         var menu = ThemePalette.CreateThemedContextMenu();
 
-        if (!string.IsNullOrWhiteSpace(slot.TargetPath))
+        var targetPath = !string.IsNullOrWhiteSpace(slot.TargetPath)
+            ? slot.TargetPath
+            : slot.RunningWindows.FirstOrDefault(w => !string.IsNullOrWhiteSpace(w.ExecutablePath))?.ExecutablePath ?? string.Empty;
+
+        if (!string.IsNullOrWhiteSpace(targetPath))
         {
             var openNewMi = new MenuItem { Header = slot.IsRunning ? "打开新实例" : "打开" };
             openNewMi.Click += (_, _) =>
             {
-                try { _shellService.OpenPath(slot.TargetPath, slot.Arguments); } catch { }
+                try { _shellService.OpenPath(targetPath, slot.Arguments); } catch { }
             };
             menu.Items.Add(openNewMi);
         }
@@ -563,10 +702,24 @@ public partial class DockWindow : Window
             unpinMi.Click += (_, _) => _dockManager.UnpinItem(slot.Id);
             menu.Items.Add(unpinMi);
         }
-        else if (!string.IsNullOrWhiteSpace(slot.TargetPath))
+        else
         {
-            var pinMi = new MenuItem { Header = "固定到 Dock" };
-            pinMi.Click += (_, _) => _dockManager.PinItem(slot.TargetPath, slot.DisplayName);
+            var pinMi = new MenuItem
+            {
+                Header = "固定到 Dock",
+                IsEnabled = !string.IsNullOrWhiteSpace(targetPath)
+            };
+            pinMi.Click += (_, _) =>
+            {
+                if (!string.IsNullOrWhiteSpace(targetPath))
+                {
+                    var resolved = targetPath.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase)
+                        ? _shellService.ResolveShortcutTarget(targetPath)
+                        : targetPath;
+                    if (_dockManager.PinItem(targetPath, slot.DisplayName, resolved))
+                        RefreshDock();
+                }
+            };
             menu.Items.Add(pinMi);
         }
 
@@ -587,6 +740,98 @@ public partial class DockWindow : Window
 
         menu.PlacementTarget = target;
         menu.IsOpen = true;
+    }
+
+    private void OnClockMouseEnter(object sender, MouseEventArgs e)
+    {
+        DockClockButton.Background = (Brush)FindResource("DgHoverBrush");
+    }
+
+    private void OnClockMouseLeave(object sender, MouseEventArgs e)
+    {
+        if (!PowerMenuPopup.IsOpen)
+            DockClockButton.Background = Brushes.Transparent;
+    }
+
+    private void OnPowerPopupClosed(object? sender, EventArgs e)
+    {
+        if (!DockClockButton.IsMouseOver)
+            DockClockButton.Background = Brushes.Transparent;
+    }
+
+    private void OnClockClicked(object sender, MouseButtonEventArgs e)
+    {
+        e.Handled = true;
+        PinnedPanel.SmoothResetScales();
+        RunningPanel.SmoothResetScales();
+        try { _activePopup?.Close(); } catch { }
+        _activePopup = null;
+
+        PowerMenuPopup.IsOpen = !PowerMenuPopup.IsOpen;
+        if (!PowerMenuPopup.IsOpen && !DockClockButton.IsMouseOver)
+            DockClockButton.Background = Brushes.Transparent;
+    }
+
+    private void OnPowerLockClick(object sender, RoutedEventArgs e)
+    {
+        PowerMenuPopup.IsOpen = false;
+        DockClockButton.Background = Brushes.Transparent;
+        SystemPowerService.LockScreen();
+    }
+
+    private void OnPowerSleepClick(object sender, RoutedEventArgs e)
+    {
+        PowerMenuPopup.IsOpen = false;
+        DockClockButton.Background = Brushes.Transparent;
+        SystemPowerService.Sleep();
+    }
+
+    private void OnPowerRestartClick(object sender, RoutedEventArgs e)
+    {
+        PowerMenuPopup.IsOpen = false;
+        DockClockButton.Background = Brushes.Transparent;
+
+        var confirm = MessageBox.Show(
+            "确定要立即重启计算机吗？请先保存所有未保存的工作。",
+            "DeskGrid - 重启确认",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (confirm == MessageBoxResult.Yes)
+        {
+            try
+            {
+                SystemPowerService.Restart();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"执行重启失败：{ex.Message}", "DeskGrid", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
+    }
+
+    private void OnPowerShutdownClick(object sender, RoutedEventArgs e)
+    {
+        PowerMenuPopup.IsOpen = false;
+        DockClockButton.Background = Brushes.Transparent;
+
+        var confirm = MessageBox.Show(
+            "确定要立即关闭计算机吗？请先保存所有未保存的工作。",
+            "DeskGrid - 关机确认",
+            MessageBoxButton.YesNo,
+            MessageBoxImage.Warning);
+
+        if (confirm == MessageBoxResult.Yes)
+        {
+            try
+            {
+                SystemPowerService.Shutdown();
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"执行关机失败：{ex.Message}", "DeskGrid", MessageBoxButton.OK, MessageBoxImage.Error);
+            }
+        }
     }
 
     private void OnToggleNativeIcons(object sender, RoutedEventArgs e)
@@ -628,7 +873,7 @@ public partial class DockWindow : Window
             return false;
 
         var ptInPinned = e.GetPosition(PinnedPanel);
-        // Restrict strictly to the center PinnedPanel zone; exclude QuickToolsPanel (left) and RunningPanel (right)
+        // Restrict strictly to the center PinnedPanel zone; exclude QuickToolsPanel (left), RunningPanel and Clock (right)
         var inPinnedZone = ptInPinned.X >= -6.0 &&
                            ptInPinned.X <= PinnedPanel.ActualWidth + 6.0 &&
                            ptInPinned.Y >= -28.0 &&
@@ -660,6 +905,8 @@ public partial class DockWindow : Window
         PinnedDropIndicator.Visibility = Visibility.Collapsed;
     }
 
+    private void OnDockDragEnter(object sender, DragEventArgs e) => OnDockDragOver(sender, e);
+
     private void OnDockDragOver(object sender, DragEventArgs e)
     {
         var internalPayload = DragDropFormats.TryGetInternalPayload(e.Data);
@@ -684,7 +931,7 @@ public partial class DockWindow : Window
             }
             else
             {
-                // Explicitly forbid dropping into Quick Tools (left) or Running Windows (right) zones
+                // Explicitly forbid dropping into Quick Tools (left), Running Windows, or Clock (right) zones
                 PinnedPanel.SetDragInsertionSlot(null);
                 HidePinnedDropIndicator();
                 e.Effects = DragDropEffects.None;
@@ -698,7 +945,9 @@ public partial class DockWindow : Window
         var paths = DragDropFormats.GetDroppedPaths(e.Data);
         if (paths.Length > 0)
         {
-            e.Effects = DragDropEffects.Link;
+            e.Effects = e.AllowedEffects.HasFlag(DragDropEffects.Link)
+                ? DragDropEffects.Link
+                : (e.AllowedEffects.HasFlag(DragDropEffects.Copy) ? DragDropEffects.Copy : DragDropEffects.Move);
             DockPill.BorderBrush = (Brush)FindResource("DgAccentBrush");
         }
         else
@@ -743,13 +992,10 @@ public partial class DockWindow : Window
         var paths = DragDropFormats.GetDroppedPaths(e.Data);
         foreach (var path in paths)
         {
-            var resolved = path.EndsWith(".lnk", StringComparison.OrdinalIgnoreCase)
-                ? _shellService.ResolveShortcutTarget(path)
-                : null;
             var name = internalPayload is not null && internalPayload.TargetPath == path
                 ? internalPayload.DisplayName
                 : null;
-            _dockManager.PinItem(path, name, resolved);
+            PinDroppedOrSelectedPath(path, name);
         }
 
         RefreshDock();

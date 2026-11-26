@@ -15,6 +15,7 @@
         PreviewKeyDown="OnPreviewKeyDown"
         MouseEnter="OnBoxMouseEnter"
         MouseLeave="OnBoxMouseLeave"
+        DragEnter="OnBoxDragOver"
         DragOver="OnBoxDragOver"
         DragLeave="OnBoxDragLeave"
         Drop="OnBoxDrop">

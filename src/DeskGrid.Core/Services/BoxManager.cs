@@ -188,15 +188,75 @@ public sealed class BoxManager : IDisposable
         return string.IsNullOrWhiteSpace(fileName) ? trimmed : fileName;
     }
 
+    public static string CleanTargetPath(string? targetPath)
+    {
+        if (string.IsNullOrWhiteSpace(targetPath))
+            return string.Empty;
+
+        var trimmed = targetPath.Trim().Trim('"').Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+            return string.Empty;
+
+        if (Uri.TryCreate(trimmed, UriKind.Absolute, out var uri) &&
+            (uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) ||
+             uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)))
+        {
+            return trimmed;
+        }
+
+        // Preserve root paths like "C:\" or "/" while trimming redundant trailing slashes
+        if (trimmed.Length == 3 && char.IsLetter(trimmed[0]) && trimmed[1] == ':' && (trimmed[2] == '\\' || trimmed[2] == '/'))
+            return trimmed;
+        if (trimmed == "/" || trimmed == "\\")
+            return trimmed;
+
+        var stripped = trimmed.TrimEnd('\\', '/');
+        if (stripped.Length == 2 && char.IsLetter(stripped[0]) && stripped[1] == ':')
+            return stripped + "\\";
+
+        return string.IsNullOrEmpty(stripped) ? trimmed : stripped;
+    }
+
+    public static string NormalizeTargetPathForComparison(string? targetPath)
+    {
+        var cleaned = CleanTargetPath(targetPath);
+        if (string.IsNullOrEmpty(cleaned))
+            return string.Empty;
+
+        if (Uri.TryCreate(cleaned, UriKind.Absolute, out var uri) &&
+            (uri.Scheme.Equals("http", StringComparison.OrdinalIgnoreCase) ||
+             uri.Scheme.Equals("https", StringComparison.OrdinalIgnoreCase)))
+        {
+            return cleaned.TrimEnd('/').ToLowerInvariant();
+        }
+
+        var unified = cleaned.Replace('/', '\\');
+        if (unified.Length == 2 && char.IsLetter(unified[0]) && unified[1] == ':')
+            unified += "\\";
+        else if (unified.Length > 3 || !(unified.Length == 3 && char.IsLetter(unified[0]) && unified[1] == ':'))
+            unified = unified.Length > 1 ? unified.TrimEnd('\\') : unified;
+
+        return unified.ToLowerInvariant();
+    }
+
     public bool AddVirtualItem(string boxId, string targetPath, string? displayName = null)
     {
         var box = GetBox(boxId);
         if (box is null || box.Mode != BoxMode.Virtual || string.IsNullOrWhiteSpace(targetPath))
             return false;
 
-        var normalized = targetPath.Trim();
-        if (box.VirtualItems.Any(i => string.Equals(i.TargetPath, normalized, StringComparison.OrdinalIgnoreCase)))
+        var normalized = CleanTargetPath(targetPath);
+        var comparisonKey = NormalizeTargetPathForComparison(normalized);
+        if (string.IsNullOrEmpty(comparisonKey))
             return false;
+
+        if (box.VirtualItems.Any(i => string.Equals(
+                NormalizeTargetPathForComparison(i.TargetPath),
+                comparisonKey,
+                StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
 
         var kind = DetectItemKind(normalized);
         var name = !string.IsNullOrWhiteSpace(displayName)

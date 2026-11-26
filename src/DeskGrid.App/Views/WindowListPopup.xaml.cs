@@ -8,6 +8,10 @@ namespace DeskGrid.App.Views;
 
 public partial class WindowListPopup : Window
 {
+    private static readonly SolidColorBrush HighContrastTextBrush = CreateFrozenBrush(Color.FromRgb(0xF3, 0xF4, 0xF6));
+    private static readonly SolidColorBrush HoverRowBrush = CreateFrozenBrush(Color.FromArgb(0x1F, 0xFF, 0xFF, 0xFF));
+    private static readonly SolidColorBrush ActiveRowBrush = CreateFrozenBrush(Color.FromArgb(0x33, 0x60, 0xCD, 0xFF));
+
     private readonly Action<nint> _onActivate;
     private readonly Action<nint> _onClose;
     private bool _closing;
@@ -35,7 +39,7 @@ public partial class WindowListPopup : Window
             CornerRadius = new CornerRadius(7),
             Padding = new Thickness(8, 6, 6, 6),
             Margin = new Thickness(0, 1, 0, 1),
-            Background = win.IsActive ? (Brush)FindResource("DgSelectedBrush") : Brushes.Transparent,
+            Background = win.IsActive ? ActiveRowBrush : Brushes.Transparent,
             Cursor = Cursors.Hand
         };
 
@@ -49,7 +53,7 @@ public partial class WindowListPopup : Window
             FontSize = 12.5,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            Foreground = (Brush)FindResource("DgTextPrimaryBrush"),
+            Foreground = HighContrastTextBrush,
             Margin = new Thickness(0, 0, 8, 0)
         };
         Grid.SetColumn(title, 0);
@@ -57,10 +61,7 @@ public partial class WindowListPopup : Window
         var closeBtn = new Button
         {
             Content = "\uE8BB",
-            Style = (Style)FindResource("DgIconButtonStyle"),
-            Width = 22,
-            Height = 22,
-            FontSize = 10,
+            Style = (Style)FindResource("PopupCloseButtonStyle"),
             ToolTip = "关闭此窗口"
         };
         closeBtn.Click += (_, e) =>
@@ -78,7 +79,7 @@ public partial class WindowListPopup : Window
         row.MouseEnter += (_, _) =>
         {
             if (!win.IsActive)
-                row.Background = (Brush)FindResource("DgHoverBrush");
+                row.Background = HoverRowBrush;
         };
         row.MouseLeave += (_, _) =>
         {
@@ -92,6 +93,13 @@ public partial class WindowListPopup : Window
         };
 
         return row;
+    }
+
+    private static SolidColorBrush CreateFrozenBrush(Color color)
+    {
+        var brush = new SolidColorBrush(color);
+        brush.Freeze();
+        return brush;
     }
 
     private void OnPopupDeactivated(object? sender, EventArgs e) => SafeClose();

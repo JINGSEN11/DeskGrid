@@ -17,29 +17,66 @@
         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
             <Setter Property="TextOptions.TextRenderingMode" Value="Grayscale"/>
         </Style>
+
+        <!-- High-contrast light close button tailored for the dark frosted popup card -->
+        <Style x:Key="PopupCloseButtonStyle" TargetType="Button">
+            <Setter Property="Width" Value="24"/>
+            <Setter Property="Height" Value="24"/>
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#F3F4F6"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="FontSize" Value="10"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="UseLayoutRounding" Value="True"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="6"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="Center"
+                                              VerticalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"
+                                              TextElement.FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#2EFFFFFF"/>
+                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Opacity" Value="0.72"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
     </Window.Resources>
     <Grid Margin="12">
-        <!-- Dedicated sibling shadow layer: never wraps foreground text or controls -->
-        <Border Background="{DynamicResource DgPopupBrush}"
+        <!-- Dedicated sibling shadow + dark frosted surface (#E61E222A): never wraps foreground text -->
+        <Border Background="#E61E222A"
                 CornerRadius="12"
                 IsHitTestVisible="False">
             <Border.Effect>
-                <DropShadowEffect BlurRadius="18" ShadowDepth="4" Opacity="0.32" Color="Black"/>
+                <DropShadowEffect BlurRadius="22" ShadowDepth="6" Direction="270" Opacity="0.42" Color="#000000"/>
             </Border.Effect>
         </Border>
         <Border Background="Transparent"
-                BorderBrush="{DynamicResource DgBorderBrush}"
+                BorderBrush="#29FFFFFF"
                 BorderThickness="1"
                 CornerRadius="12"
                 Padding="8"
-                MinWidth="240"
-                MaxWidth="360"
+                MinWidth="248"
+                MaxWidth="368"
                 SnapsToDevicePixels="True">
             <StackPanel>
                 <TextBlock x:Name="AppHeaderText"
                            FontSize="12"
                            FontWeight="SemiBold"
-                           Foreground="{DynamicResource DgTextSecondaryBrush}"
+                           Foreground="#B8F3F4F6"
                            Margin="8,2,8,6"/>
                 <StackPanel x:Name="WindowsListPanel"/>
             </StackPanel>

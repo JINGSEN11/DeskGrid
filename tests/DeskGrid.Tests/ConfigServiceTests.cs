@@ -153,4 +153,45 @@ public sealed class ConfigServiceTests
                 Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [TestFact]
+    public void DockClockSettings_HaveExpectedDefaultsAndPersistAcrossSaveAndLoad()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "DeskGridTests_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var svc = new ConfigService(tempDir);
+            var cfg = svc.LoadOrCreate(FirstRunInitializer.CreateDefaultConfig);
+
+            AssertEx.True(cfg.Dock.ShowDockClock, "ShowDockClock must default to true.");
+            AssertEx.True(cfg.Dock.ClockUse24Hour, "ClockUse24Hour must default to true.");
+            AssertEx.False(cfg.Dock.ClockShowSeconds, "ClockShowSeconds must default to false.");
+            AssertEx.True(cfg.Dock.ClockShowDate, "ClockShowDate must default to true.");
+
+            cfg.Dock.ShowDockClock = false;
+            cfg.Dock.ClockUse24Hour = false;
+            cfg.Dock.ClockShowSeconds = true;
+            cfg.Dock.ClockShowDate = false;
+            svc.Save(cfg);
+
+            var reloaded = svc.LoadOrCreate(() => new AppConfig());
+            AssertEx.False(reloaded.Dock.ShowDockClock);
+            AssertEx.False(reloaded.Dock.ClockUse24Hour);
+            AssertEx.True(reloaded.Dock.ClockShowSeconds);
+            AssertEx.False(reloaded.Dock.ClockShowDate);
+
+            // Legacy JSON without clock fields should fall back to defaults cleanly
+            File.WriteAllText(svc.ConfigFilePath, """{ "schemaVersion": 2, "showDock": true, "dock": { "enableMagnification": true } }""");
+            var legacy = svc.LoadOrCreate(() => new AppConfig());
+            AssertEx.True(legacy.Dock.ShowDockClock);
+            AssertEx.True(legacy.Dock.ClockUse24Hour);
+            AssertEx.False(legacy.Dock.ClockShowSeconds);
+            AssertEx.True(legacy.Dock.ClockShowDate);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+                Directory.Delete(tempDir, recursive: true);
+        }
+    }
 }

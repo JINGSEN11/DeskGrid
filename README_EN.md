@@ -5,6 +5,7 @@
 **An open-source, lightweight Windows desktop organizer and enhanced Fluent Dock for Windows 11 (and Windows 10).**
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Version](https://img.shields.io/badge/Version-v0.2.0-0A84FF)](https://github.com/JINGSEN11/DeskGrid/releases)
 [![Platform](https://img.shields.io/badge/Platform-Windows%2011%20%7C%2010-0078D4?logo=windows)](https://www.microsoft.com/windows)
 [![.NET](https://img.shields.io/badge/.NET-10.0%20LTS-512BD4?logo=dotnet)](https://dotnet.microsoft.com/)
 [![Zero Dependencies](https://img.shields.io/badge/Dependencies-Zero%203rd--Party-success)](#architecture--highlights)

@@ -78,6 +78,10 @@ public sealed class DockConfig
     public double BaseIconSize { get; set; } = 44.0;
     public bool AutoHideOnFullscreen { get; set; } = true;
     public bool AutoHideSystemTaskbar { get; set; } = false;
+    public bool ShowDockClock { get; set; } = true;
+    public bool ClockUse24Hour { get; set; } = true;
+    public bool ClockShowSeconds { get; set; } = false;
+    public bool ClockShowDate { get; set; } = true;
     public List<DockPinnedItem> PinnedItems { get; set; } = [];
 }
 

@@ -51,6 +51,41 @@ public sealed class BoxAndGridTests
     }
 
     [TestFact]
+    public void VirtualBox_BlocksDuplicateShortcutsIgnoringCaseTrailingSlashAndQuotes()
+    {
+        var tempDir = Path.Combine(Path.GetTempPath(), "DeskGridTests_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var cfgSvc = new ConfigService(Path.Combine(tempDir, "cfg"));
+            var cfg = new AppConfig();
+            using var mgr = new BoxManager(cfg, cfgSvc);
+
+            var box = mgr.CreateBox("去重测试盒", BoxMode.Virtual);
+
+            // File / shortcut path deduplication (case, slash direction, quotes)
+            AssertEx.True(mgr.AddVirtualItem(box.Id, @"C:\Users\Demo\Desktop\App.lnk"));
+            AssertEx.False(mgr.AddVirtualItem(box.Id, @"c:\users\demo\desktop\app.lnk"), "Case-only duplicate must be blocked.");
+            AssertEx.False(mgr.AddVirtualItem(box.Id, "  \"C:/Users/Demo/Desktop/App.lnk\"  "), "Quoted/slash-normalized duplicate must be blocked.");
+
+            // Folder path deduplication (trailing slash)
+            AssertEx.True(mgr.AddVirtualItem(box.Id, @"C:\Projects\DeskGrid\"));
+            AssertEx.False(mgr.AddVirtualItem(box.Id, @"C:\Projects\DeskGrid"), "Trailing-slash folder duplicate must be blocked.");
+            AssertEx.False(mgr.AddVirtualItem(box.Id, @"c:/projects/deskgrid///"), "Multiple trailing slashes duplicate must be blocked.");
+
+            // URL deduplication (case and trailing slash)
+            AssertEx.True(mgr.AddVirtualItem(box.Id, "https://github.com/JINGSEN11/DeskGrid/"));
+            AssertEx.False(mgr.AddVirtualItem(box.Id, "HTTPS://GITHUB.COM/JINGSEN11/DeskGrid"), "URL trailing-slash/case duplicate must be blocked.");
+
+            AssertEx.Equal(3, box.VirtualItems.Count);
+        }
+        finally
+        {
+            if (Directory.Exists(tempDir))
+                Directory.Delete(tempDir, recursive: true);
+        }
+    }
+
+    [TestFact]
     public void FolderPortalBox_ReadsRealFolderAndSortsFoldersFirst()
     {
         var tempDir = Path.Combine(Path.GetTempPath(), "DeskGridTests_" + Guid.NewGuid().ToString("N"));

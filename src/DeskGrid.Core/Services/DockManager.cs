@@ -186,12 +186,16 @@ public sealed class DockManager
         if (string.IsNullOrWhiteSpace(targetPath))
             return false;
 
-        var normalizedPath = targetPath.Trim();
+        var normalizedPath = BoxManager.CleanTargetPath(targetPath);
+        if (string.IsNullOrWhiteSpace(normalizedPath))
+            return false;
+
+        var pathKey = BoxManager.NormalizeTargetPathForComparison(normalizedPath);
         var keySource = !string.IsNullOrWhiteSpace(resolvedExecutablePath) ? resolvedExecutablePath : normalizedPath;
         var appKey = NormalizeAppKey(keySource);
 
         if (_config.Dock.PinnedItems.Any(p =>
-                string.Equals(p.TargetPath, normalizedPath, StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(BoxManager.NormalizeTargetPathForComparison(p.TargetPath), pathKey, StringComparison.OrdinalIgnoreCase) ||
                 (!string.IsNullOrWhiteSpace(appKey) && string.Equals(p.AppKey, appKey, StringComparison.OrdinalIgnoreCase))))
         {
             return false;

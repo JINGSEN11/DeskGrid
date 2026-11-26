@@ -220,11 +220,22 @@ public partial class App : Application
             _config,
             _configService,
             ApplyAllSettingsLive,
+            ApplyGlobalBoxOpacityLive,
             ReplaceConfigAndReload,
             EmergencyRestoreSystemState);
 
         _settingsWindow.Closed += (_, _) => _settingsWindow = null;
         _settingsWindow.Show();
+    }
+
+    private void ApplyGlobalBoxOpacityLive(double opacity)
+    {
+        var clamped = Math.Clamp(opacity, 0.15, 0.90);
+        foreach (var box in _config.Boxes)
+            box.Opacity = clamped;
+
+        foreach (var win in _boxWindows.Values)
+            win.ApplyOpacity(clamped);
     }
 
     private void ApplyAllSettingsLive()
@@ -267,7 +278,14 @@ public partial class App : Application
 
         _taskbarService.SetTaskbarHidden(_config.ShowDock && _config.Dock.AutoHideSystemTaskbar);
         if (_config.ShowDock)
+        {
             _dockWindow?.RepositionDock();
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
+            {
+                if (_config.ShowDock)
+                    _dockWindow?.RepositionDock();
+            });
+        }
     }
 
     private void ReplaceConfigAndReload(AppConfig newConfig)

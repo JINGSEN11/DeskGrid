@@ -52,6 +52,10 @@ public static class FirstRunInitializer
                 BaseIconSize = 44,
                 AutoHideOnFullscreen = true,
                 AutoHideSystemTaskbar = false,
+                ShowDockClock = true,
+                ClockUse24Hour = true,
+                ClockShowSeconds = false,
+                ClockShowDate = true,
                 PinnedItems = BuildDefaultPinnedItems()
             },
             Boxes =

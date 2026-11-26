@@ -13,6 +13,8 @@ release/
 # Local CLI / NuGet scratch
 .dotnet-cli/
 .nuget/
+.venv/
+*.zip
 
 # Local portable / runtime files
 portable.flag

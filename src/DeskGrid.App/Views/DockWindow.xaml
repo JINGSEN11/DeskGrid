@@ -15,6 +15,7 @@
         SnapsToDevicePixels="True"
         TextOptions.TextFormattingMode="Ideal"
         TextOptions.TextRenderingMode="Grayscale"
+        DragEnter="OnDockDragEnter"
         DragOver="OnDockDragOver"
         DragLeave="OnDockDragLeave"
         Drop="OnDockDrop">
@@ -22,6 +23,44 @@
     <Window.Resources>
         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
             <Setter Property="TextOptions.TextRenderingMode" Value="Grayscale"/>
+        </Style>
+
+        <!-- Power popup action button style: matches dark frosted menu aesthetic -->
+        <Style x:Key="DgPowerMenuItemStyle" TargetType="Button">
+            <Setter Property="Background" Value="Transparent"/>
+            <Setter Property="Foreground" Value="#F3F4F6"/>
+            <Setter Property="BorderThickness" Value="0"/>
+            <Setter Property="Padding" Value="10,7,12,7"/>
+            <Setter Property="HorizontalContentAlignment" Value="Left"/>
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="FontSize" Value="13"/>
+            <Setter Property="UseLayoutRounding" Value="True"/>
+            <Setter Property="SnapsToDevicePixels" Value="True"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="Bd"
+                                Background="{TemplateBinding Background}"
+                                CornerRadius="7"
+                                Margin="0,1,0,1"
+                                Padding="{TemplateBinding Padding}"
+                                SnapsToDevicePixels="True">
+                            <ContentPresenter HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                                              VerticalAlignment="Center"
+                                              TextElement.Foreground="{TemplateBinding Foreground}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Bd" Property="Background" Value="#1FFFFFFF"/>
+                                <Setter Property="Foreground" Value="#FFFFFF"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="Bd" Property="Opacity" Value="0.76"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
         </Style>
     </Window.Resources>
 
@@ -47,7 +86,8 @@
                 BorderBrush="{DynamicResource DgGlassBorderBrush}"
                 BorderThickness="1"
                 CornerRadius="22"
-                SnapsToDevicePixels="True">
+                SnapsToDevicePixels="True"
+                MouseRightButtonUp="OnDockBackgroundRightClick">
 
             <Grid>
                 <!-- Matching Liquid Glass specular sheen -->
@@ -123,9 +163,137 @@
                             Visibility="Collapsed"
                             Background="{DynamicResource DgDividerBrush}"/>
 
-                    <!-- 3. Rightmost: Unpinned Running Windows -->
+                    <!-- 3. Running Windows -->
                     <controls:DockMagnifyingPanel x:Name="RunningPanel"/>
+
+                    <!-- Divider before Minimalist Clock -->
+                    <Border x:Name="ClockDivider"
+                            Width="1"
+                            Height="28"
+                            Margin="10,0,10,0"
+                            VerticalAlignment="Center"
+                            Background="{DynamicResource DgDividerBrush}"/>
+
+                    <!-- 4. Rightmost Anchor: Minimalist Custom Clock (does NOT magnify) -->
+                    <Border x:Name="DockClockButton"
+                            Background="Transparent"
+                            CornerRadius="10"
+                            Padding="10,4,10,4"
+                            VerticalAlignment="Center"
+                            Cursor="Hand"
+                            SnapsToDevicePixels="True"
+                            MouseEnter="OnClockMouseEnter"
+                            MouseLeave="OnClockMouseLeave"
+                            MouseLeftButtonUp="OnClockClicked">
+                        <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+                            <TextBlock x:Name="ClockTimeText"
+                                       FontSize="13"
+                                       FontWeight="SemiBold"
+                                       Foreground="#F3F4F6"
+                                       HorizontalAlignment="Center"
+                                       TextAlignment="Center"/>
+                            <TextBlock x:Name="ClockDateText"
+                                       FontSize="10"
+                                       FontWeight="Normal"
+                                       Foreground="#B8F3F4F6"
+                                       HorizontalAlignment="Center"
+                                       TextAlignment="Center"
+                                       Margin="0,1,0,0"/>
+                        </StackPanel>
+                    </Border>
                 </StackPanel>
+
+                <!-- Quick Power Control Popup (opens above DockClockButton) -->
+                <Popup x:Name="PowerMenuPopup"
+                       PlacementTarget="{Binding ElementName=DockClockButton}"
+                       Placement="Top"
+                       VerticalOffset="-10"
+                       AllowsTransparency="True"
+                       StaysOpen="False"
+                       PopupAnimation="Fade"
+                       Closed="OnPowerPopupClosed">
+                    <Grid Margin="10"
+                          UseLayoutRounding="True"
+                          SnapsToDevicePixels="True"
+                          TextOptions.TextFormattingMode="Ideal"
+                          TextOptions.TextRenderingMode="Grayscale">
+                        <!-- Dedicated sibling shadow + dark frosted surface (#E61E222A) -->
+                        <Border Background="#E61E222A"
+                                CornerRadius="12"
+                                IsHitTestVisible="False">
+                            <Border.Effect>
+                                <DropShadowEffect BlurRadius="22"
+                                                  ShadowDepth="6"
+                                                  Direction="270"
+                                                  Opacity="0.42"
+                                                  Color="#000000"/>
+                            </Border.Effect>
+                        </Border>
+
+                        <Border Background="Transparent"
+                                BorderBrush="#29FFFFFF"
+                                BorderThickness="1"
+                                CornerRadius="12"
+                                Padding="6"
+                                MinWidth="164"
+                                SnapsToDevicePixels="True">
+                            <StackPanel>
+                                <TextBlock Text="电源控制"
+                                           FontSize="11.5"
+                                           FontWeight="SemiBold"
+                                           Foreground="#99F3F4F6"
+                                           Margin="10,3,10,6"/>
+
+                                <Button Style="{StaticResource DgPowerMenuItemStyle}" Click="OnPowerLockClick">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="&#xE72E;"
+                                                   FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                                   FontSize="13"
+                                                   VerticalAlignment="Center"
+                                                   Margin="0,0,10,0"/>
+                                        <TextBlock Text="锁定屏幕" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+
+                                <Button Style="{StaticResource DgPowerMenuItemStyle}" Click="OnPowerSleepClick">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="&#xE708;"
+                                                   FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                                   FontSize="13"
+                                                   VerticalAlignment="Center"
+                                                   Margin="0,0,10,0"/>
+                                        <TextBlock Text="睡眠" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+
+                                <Border Height="1" Background="#1FFFFFFF" Margin="8,5,8,5"/>
+
+                                <Button Style="{StaticResource DgPowerMenuItemStyle}" Click="OnPowerRestartClick">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="&#xE777;"
+                                                   FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                                   FontSize="13"
+                                                   VerticalAlignment="Center"
+                                                   Margin="0,0,10,0"/>
+                                        <TextBlock Text="重启" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+
+                                <Button Style="{StaticResource DgPowerMenuItemStyle}" Click="OnPowerShutdownClick">
+                                    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                                        <TextBlock Text="&#xE7E8;"
+                                                   FontFamily="Segoe Fluent Icons, Segoe MDL2 Assets"
+                                                   FontSize="13"
+                                                   Foreground="#FF8A8A"
+                                                   VerticalAlignment="Center"
+                                                   Margin="0,0,10,0"/>
+                                        <TextBlock Text="关机" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                </Button>
+                            </StackPanel>
+                        </Border>
+                    </Grid>
+                </Popup>
             </Grid>
         </Border>
     </Grid>

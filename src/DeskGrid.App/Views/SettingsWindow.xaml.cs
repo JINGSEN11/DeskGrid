@@ -1,6 +1,8 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Threading;
 using DeskGrid.Core.Models;
 using DeskGrid.Core.Services;
 using Microsoft.Win32;
@@ -12,14 +14,18 @@ public partial class SettingsWindow : Window
     private readonly AppConfig _config;
     private readonly ConfigService _configService;
     private readonly Action _onSettingsApplied;
+    private readonly Action<double> _onGlobalBoxOpacityChanged;
     private readonly Action<AppConfig> _onConfigReplaced;
     private readonly Action _onEmergencyRestore;
+    private readonly DispatcherTimer _opacitySaveDebounceTimer;
+    private bool _hasPendingOpacitySave;
     private bool _loading = true;
 
     public SettingsWindow(
         AppConfig config,
         ConfigService configService,
         Action onSettingsApplied,
+        Action<double> onGlobalBoxOpacityChanged,
         Action<AppConfig> onConfigReplaced,
         Action onEmergencyRestore)
     {
@@ -28,8 +34,15 @@ public partial class SettingsWindow : Window
         _config = config;
         _configService = configService;
         _onSettingsApplied = onSettingsApplied;
+        _onGlobalBoxOpacityChanged = onGlobalBoxOpacityChanged;
         _onConfigReplaced = onConfigReplaced;
         _onEmergencyRestore = onEmergencyRestore;
+
+        _opacitySaveDebounceTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(220)
+        };
+        _opacitySaveDebounceTimer.Tick += (_, _) => FlushPendingOpacitySave();
 
         LoadControlsFromConfig();
         _loading = false;
@@ -65,6 +78,46 @@ public partial class SettingsWindow : Window
         MagScaleValueText.Text = $"{_config.Dock.MagnificationScale:0.00}x";
         FullscreenHideCheck.IsChecked = _config.Dock.AutoHideOnFullscreen;
         HideTaskbarCheck.IsChecked = _config.Dock.AutoHideSystemTaskbar;
+        UpdateTaskbarHintVisibility(_config.Dock.AutoHideSystemTaskbar);
+
+        ShowDockClockCheck.IsChecked = _config.Dock.ShowDockClock;
+        ClockOptionsPanel.IsEnabled = _config.Dock.ShowDockClock;
+        Clock24HourCheck.IsChecked = _config.Dock.ClockUse24Hour;
+        ClockShowSecondsCheck.IsChecked = _config.Dock.ClockShowSeconds;
+        ClockShowDateCheck.IsChecked = _config.Dock.ClockShowDate;
+    }
+
+    private void UpdateTaskbarHintVisibility(bool isHideTaskbarEnabled)
+    {
+        TaskbarUncheckedHintText.Visibility = isHideTaskbarEnabled ? Visibility.Collapsed : Visibility.Visible;
+        TaskbarCheckedHintText.Visibility = isHideTaskbarEnabled ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnOpacitySliderValueChanged(object sender, RoutedPropertyChangedEventArgs<double> e)
+    {
+        if (_loading) return;
+
+        var opacity = Math.Round(OpacitySlider.Value, 2);
+        _config.Appearance.DefaultBoxOpacity = opacity;
+        OpacityValueText.Text = $"{Math.Round(opacity * 100)}%";
+
+        // Immediately sync background brush opacity across all currently open DesktopBoxWindow instances
+        _onGlobalBoxOpacityChanged(opacity);
+
+        // Debounce disk persistence while continuously dragging the slider
+        _hasPendingOpacitySave = true;
+        _opacitySaveDebounceTimer.Stop();
+        _opacitySaveDebounceTimer.Start();
+    }
+
+    private void FlushPendingOpacitySave()
+    {
+        _opacitySaveDebounceTimer.Stop();
+        if (!_hasPendingOpacitySave)
+            return;
+
+        _hasPendingOpacitySave = false;
+        _configService.Save(_config);
     }
 
     private void OnSettingChanged(object sender, RoutedEventArgs e)
@@ -83,9 +136,6 @@ public partial class SettingsWindow : Window
             _config.Appearance.Backdrop = bdPref;
         }
 
-        _config.Appearance.DefaultBoxOpacity = Math.Round(OpacitySlider.Value, 2);
-        OpacityValueText.Text = $"{Math.Round(_config.Appearance.DefaultBoxOpacity * 100)}%";
-
         _config.Behavior.LaunchAtStartup = StartupCheck.IsChecked == true;
         _config.Behavior.DoubleClickDesktopToToggleBoxes = DoubleClickDesktopCheck.IsChecked == true;
         _config.Behavior.EnableGridSnap = GridSnapCheck.IsChecked == true;
@@ -98,13 +148,23 @@ public partial class SettingsWindow : Window
         MagScaleValueText.Text = $"{_config.Dock.MagnificationScale:0.00}x";
         _config.Dock.AutoHideOnFullscreen = FullscreenHideCheck.IsChecked == true;
         _config.Dock.AutoHideSystemTaskbar = HideTaskbarCheck.IsChecked == true;
+        UpdateTaskbarHintVisibility(_config.Dock.AutoHideSystemTaskbar);
 
+        _config.Dock.ShowDockClock = ShowDockClockCheck.IsChecked == true;
+        ClockOptionsPanel.IsEnabled = _config.Dock.ShowDockClock;
+        _config.Dock.ClockUse24Hour = Clock24HourCheck.IsChecked == true;
+        _config.Dock.ClockShowSeconds = ClockShowSecondsCheck.IsChecked == true;
+        _config.Dock.ClockShowDate = ClockShowDateCheck.IsChecked == true;
+
+        _opacitySaveDebounceTimer.Stop();
+        _hasPendingOpacitySave = false;
         _configService.Save(_config);
         _onSettingsApplied();
     }
 
     private void OnExportConfig(object sender, RoutedEventArgs e)
     {
+        FlushPendingOpacitySave();
         var dlg = new SaveFileDialog
         {
             Title = "导出 DeskGrid 配置",
@@ -128,6 +188,8 @@ public partial class SettingsWindow : Window
 
     private void OnImportConfig(object sender, RoutedEventArgs e)
     {
+        _opacitySaveDebounceTimer.Stop();
+        _hasPendingOpacitySave = false;
         var dlg = new OpenFileDialog
         {
             Title = "导入 DeskGrid 配置",
@@ -171,8 +233,11 @@ public partial class SettingsWindow : Window
         _loading = true;
         HideTaskbarCheck.IsChecked = false;
         _config.Dock.AutoHideSystemTaskbar = false;
+        UpdateTaskbarHintVisibility(false);
         _loading = false;
 
+        _opacitySaveDebounceTimer.Stop();
+        _hasPendingOpacitySave = false;
         _configService.Save(_config);
         _onEmergencyRestore();
         MessageBox.Show(this, "已恢复系统任务栏与原生桌面图标显示。", "DeskGrid", MessageBoxButton.OK, MessageBoxImage.Information);
@@ -189,12 +254,16 @@ public partial class SettingsWindow : Window
 
         if (confirm == MessageBoxResult.Yes)
         {
+            _opacitySaveDebounceTimer.Stop();
+            _hasPendingOpacitySave = false;
             var fresh = FirstRunInitializer.CreateDefaultConfig(SystemParameters.WorkArea.Width, SystemParameters.WorkArea.Height);
             _configService.Save(fresh);
             _onConfigReplaced(fresh);
             Close();
         }
     }
+
+    private void OnWindowClosing(object? sender, CancelEventArgs e) => FlushPendingOpacitySave();
 
     private void OnClose(object sender, RoutedEventArgs e) => Close();
 }
