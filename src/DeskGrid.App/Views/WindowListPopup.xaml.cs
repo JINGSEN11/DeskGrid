@@ -3,6 +3,8 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
 using DeskGrid.Core.Models;
+using DeskGrid.Core.Services;
+using DeskGrid.Win32.Services;
 
 namespace DeskGrid.App.Views;
 
@@ -100,6 +102,47 @@ public partial class WindowListPopup : Window
         var brush = new SolidColorBrush(color);
         brush.Freeze();
         return brush;
+    }
+
+    public void Dismiss() => SafeClose();
+
+    public bool TryGetCardPhysicalRect(out PhysicalRect rect)
+    {
+        if (PopupCardBorder.IsVisible &&
+            PopupCardBorder.ActualWidth > 0 &&
+            PopupCardBorder.ActualHeight > 0 &&
+            PresentationSource.FromVisual(PopupCardBorder) is not null)
+        {
+            try
+            {
+                var topLeft = PopupCardBorder.PointToScreen(new Point(0, 0));
+                var bottomRight = PopupCardBorder.PointToScreen(new Point(PopupCardBorder.ActualWidth, PopupCardBorder.ActualHeight));
+                var left = (int)Math.Floor(Math.Min(topLeft.X, bottomRight.X));
+                var top = (int)Math.Floor(Math.Min(topLeft.Y, bottomRight.Y));
+                var right = (int)Math.Ceiling(Math.Max(topLeft.X, bottomRight.X));
+                var bottom = (int)Math.Ceiling(Math.Max(topLeft.Y, bottomRight.Y));
+                if (right > left && bottom > top)
+                {
+                    rect = new PhysicalRect(left, top, right, bottom);
+                    return true;
+                }
+            }
+            catch
+            {
+                // Fall back to Win32 GetWindowRect below
+            }
+        }
+
+        return DisplayMonitorService.TryGetWindowPhysicalRect(this, out rect);
+    }
+
+    private void OnPopupPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape)
+        {
+            e.Handled = true;
+            SafeClose();
+        }
     }
 
     private void OnPopupDeactivated(object? sender, EventArgs e) => SafeClose();

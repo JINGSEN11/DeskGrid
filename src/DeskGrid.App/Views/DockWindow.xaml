@@ -214,7 +214,9 @@
                        AllowsTransparency="True"
                        StaysOpen="False"
                        PopupAnimation="Fade"
-                       Closed="OnPowerPopupClosed">
+                       Opened="OnPowerPopupOpened"
+                       Closed="OnPowerPopupClosed"
+                       PreviewKeyDown="OnPowerPopupPreviewKeyDown">
                     <Grid Margin="10"
                           UseLayoutRounding="True"
                           SnapsToDevicePixels="True"
@@ -233,7 +235,8 @@
                             </Border.Effect>
                         </Border>
 
-                        <Border Background="Transparent"
+                        <Border x:Name="PowerMenuCardBorder"
+                                Background="Transparent"
                                 BorderBrush="#29FFFFFF"
                                 BorderThickness="1"
                                 CornerRadius="12"

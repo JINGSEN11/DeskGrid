@@ -362,4 +362,57 @@ public sealed class DockEnhancementTests
                 Directory.Delete(tempDir, recursive: true);
         }
     }
+
+    [TestFact]
+    public void PopupDismissEvaluator_DismissesOnExternalClicksAndExcludesPopupTriggerAndConfirmModal()
+    {
+        // Primary monitor power popup card + Dock clock trigger button
+        var powerCard = new PhysicalRect(1600, 760, 1780, 960);
+        var clockTrigger = new PhysicalRect(1660, 976, 1750, 1024);
+
+        // Clicking empty desktop or another window dismisses immediately
+        AssertEx.True(PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+            isPopupOpen: true, isSuppressedByModalDialog: false,
+            clickScreenX: 500, clickScreenY: 400,
+            popupBoundsPx: powerCard, triggerBoundsPx: clockTrigger));
+
+        // Clicking inside the power popup card must NOT dismiss on mouse-down
+        AssertEx.False(PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+            isPopupOpen: true, isSuppressedByModalDialog: false,
+            clickScreenX: 1680, clickScreenY: 840,
+            popupBoundsPx: powerCard, triggerBoundsPx: clockTrigger));
+
+        // Clicking on the Dock clock trigger button must NOT dismiss on mouse-down (lets toggle click close cleanly)
+        AssertEx.False(PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+            isPopupOpen: true, isSuppressedByModalDialog: false,
+            clickScreenX: 1700, clickScreenY: 1000,
+            popupBoundsPx: powerCard, triggerBoundsPx: clockTrigger));
+
+        // While restart/shutdown confirmation modal is open, external clicks must be suppressed
+        AssertEx.False(PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+            isPopupOpen: true, isSuppressedByModalDialog: true,
+            clickScreenX: 500, clickScreenY: 400,
+            popupBoundsPx: powerCard, triggerBoundsPx: clockTrigger));
+
+        // Closed popup never triggers dismiss
+        AssertEx.False(PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+            isPopupOpen: false, isSuppressedByModalDialog: false,
+            clickScreenX: 500, clickScreenY: 400,
+            popupBoundsPx: powerCard, triggerBoundsPx: clockTrigger));
+
+        // Secondary monitor with negative coordinates (WindowListPopup without trigger exclusion)
+        var secondaryListPopup = new PhysicalRect(-1200, 780, -900, 940);
+        AssertEx.False(PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+            isPopupOpen: true, isSuppressedByModalDialog: false,
+            clickScreenX: -1050, clickScreenY: 850,
+            popupBoundsPx: secondaryListPopup));
+        AssertEx.True(PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+            isPopupOpen: true, isSuppressedByModalDialog: false,
+            clickScreenX: -1500, clickScreenY: 500,
+            popupBoundsPx: secondaryListPopup));
+        AssertEx.True(PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+            isPopupOpen: true, isSuppressedByModalDialog: false,
+            clickScreenX: 900, clickScreenY: 500,
+            popupBoundsPx: secondaryListPopup));
+    }
 }

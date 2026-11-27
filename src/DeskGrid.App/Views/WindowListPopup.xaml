@@ -12,6 +12,7 @@
         SnapsToDevicePixels="True"
         TextOptions.TextFormattingMode="Ideal"
         TextOptions.TextRenderingMode="Grayscale"
+        PreviewKeyDown="OnPopupPreviewKeyDown"
         Deactivated="OnPopupDeactivated">
     <Window.Resources>
         <Style TargetType="TextBlock" BasedOn="{StaticResource {x:Type TextBlock}}">
@@ -64,7 +65,8 @@
                 <DropShadowEffect BlurRadius="22" ShadowDepth="6" Direction="270" Opacity="0.42" Color="#000000"/>
             </Border.Effect>
         </Border>
-        <Border Background="Transparent"
+        <Border x:Name="PopupCardBorder"
+                Background="Transparent"
                 BorderBrush="#29FFFFFF"
                 BorderThickness="1"
                 CornerRadius="12"

@@ -234,7 +234,8 @@ public partial class App : Application
             ShowSettingsWindow,
             ShowSystemTaskbarAndDisableAutoHide,
             ShutdownSafely,
-            monitor);
+            monitor,
+            _desktopHost);
     }
 
     private void CloseAndClearAllDockWindows()

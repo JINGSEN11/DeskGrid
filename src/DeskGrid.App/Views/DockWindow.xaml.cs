@@ -26,6 +26,7 @@ public partial class DockWindow : Window
     private readonly IWindowTracker _windowTracker;
     private readonly INativeDesktopIconService _nativeIcons;
     private readonly ShellIconService _shellService;
+    private readonly DesktopHostService? _desktopHost;
 
     private readonly Action _onToggleBoxes;
     private readonly Action _onCreateBox;
@@ -46,6 +47,10 @@ public partial class DockWindow : Window
     private bool _isClosed;
     private bool _repositionScheduled;
     private bool _dpiRefreshScheduled;
+    private bool _globalMouseDismissSubscribed;
+    private bool _isPowerConfirmDialogOpen;
+    private bool _suppressNextClockToggleOpen;
+    private long _suppressClockToggleUntilTick;
     private int _fadeAnimationGeneration;
 
     private string _lastClockTimeText = string.Empty;
@@ -69,6 +74,7 @@ public partial class DockWindow : Window
     public bool HasActiveEdgeRevealCountdown => _edgeRevealStateMachine.HasPendingTransition;
     public bool HasActiveOverlay =>
         PowerMenuPopup.IsOpen ||
+        _isPowerConfirmDialogOpen ||
         (_activeContextMenu is { IsOpen: true }) ||
         (_activePopup is { IsLoaded: true, IsVisible: true }) ||
         _isDragging;
@@ -84,7 +90,8 @@ public partial class DockWindow : Window
         Action onOpenSettings,
         Action onShowSystemTaskbar,
         Action onSafeExit,
-        DisplayMonitorInfo? targetMonitor = null)
+        DisplayMonitorInfo? targetMonitor = null,
+        DesktopHostService? desktopHost = null)
     {
         InitializeComponent();
 
@@ -93,6 +100,7 @@ public partial class DockWindow : Window
         _windowTracker = windowTracker;
         _nativeIcons = nativeIcons;
         _shellService = shellService;
+        _desktopHost = desktopHost;
         _onToggleBoxes = onToggleBoxes;
         _onCreateBox = onCreateBox;
         _onOpenSettings = onOpenSettings;
@@ -161,6 +169,7 @@ public partial class DockWindow : Window
             if (!_isClosed && IsLoaded && !_positionGuard.IsUpdatingPosition)
                 ScheduleReposition();
         };
+        Deactivated += (_, _) => OnDockWindowDeactivated();
         Closed += (_, _) => CleanupBeforeClose();
     }
 
@@ -173,6 +182,7 @@ public partial class DockWindow : Window
         _isClosed = true;
         _repositionScheduled = false;
         _dpiRefreshScheduled = false;
+        UnsubscribeGlobalMouseDismiss();
 
         try { _iconLoadCts.Cancel(); } catch { }
         try { _iconLoadCts.Dispose(); } catch { }
@@ -188,9 +198,9 @@ public partial class DockWindow : Window
         PinnedPanel.StopAndCleanup();
         RunningPanel.StopAndCleanup();
         CancelFadeAnimation();
-        PowerMenuPopup.IsOpen = false;
+        ClosePowerMenuPopup(resetClockHighlight: true);
         CloseActiveContextMenu();
-        try { _activePopup?.Close(); } catch { }
+        try { _activePopup?.Dismiss(); } catch { }
         _activePopup = null;
     }
 
@@ -1184,7 +1194,9 @@ public partial class DockWindow : Window
         {
             if (ReferenceEquals(_activePopup, popup))
                 _activePopup = null;
+            UpdateGlobalMouseDismissSubscription();
         };
+        UpdateGlobalMouseDismissSubscription();
 
         var screenPt = anchor.PointToScreen(new Point(anchor.ActualWidth / 2.0, 0));
         var dpi = VisualTreeHelper.GetDpi(this);
@@ -1424,10 +1436,168 @@ public partial class DockWindow : Window
             DockClockButton.Background = Brushes.Transparent;
     }
 
+    private void UpdateGlobalMouseDismissSubscription()
+    {
+        if (_desktopHost is null)
+            return;
+
+        var needsSubscription = !_isClosed && (PowerMenuPopup.IsOpen || _activePopup is not null);
+        if (needsSubscription && !_globalMouseDismissSubscribed)
+        {
+            _desktopHost.GlobalMouseButtonDown += OnGlobalMouseButtonDown;
+            _globalMouseDismissSubscribed = true;
+        }
+        else if (!needsSubscription && _globalMouseDismissSubscribed)
+        {
+            _desktopHost.GlobalMouseButtonDown -= OnGlobalMouseButtonDown;
+            _globalMouseDismissSubscribed = false;
+        }
+    }
+
+    private void UnsubscribeGlobalMouseDismiss()
+    {
+        if (_desktopHost is not null && _globalMouseDismissSubscribed)
+        {
+            _desktopHost.GlobalMouseButtonDown -= OnGlobalMouseButtonDown;
+            _globalMouseDismissSubscribed = false;
+        }
+    }
+
+    private void OnDockWindowDeactivated()
+    {
+        if (_isClosed || _isPowerConfirmDialogOpen)
+            return;
+
+        if (PowerMenuPopup.IsOpen)
+            ClosePowerMenuPopup(resetClockHighlight: true);
+    }
+
+    private void OnGlobalMouseButtonDown(object? sender, GlobalMouseButtonEventArgs e)
+    {
+        if (_isClosed)
+        {
+            UnsubscribeGlobalMouseDismiss();
+            return;
+        }
+
+        if (PowerMenuPopup.IsOpen)
+        {
+            PhysicalRect? popupRect = TryGetPowerPopupPhysicalRect(out var pr) ? pr : null;
+            PhysicalRect? clockRect = TryGetElementPhysicalBounds(DockClockButton, out var cr) ? cr : null;
+
+            if (PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+                    isPopupOpen: PowerMenuPopup.IsOpen,
+                    isSuppressedByModalDialog: _isPowerConfirmDialogOpen,
+                    clickScreenX: e.ScreenX,
+                    clickScreenY: e.ScreenY,
+                    popupBoundsPx: popupRect,
+                    triggerBoundsPx: clockRect))
+            {
+                ClosePowerMenuPopup(resetClockHighlight: true);
+            }
+        }
+
+        if (_activePopup is { IsLoaded: true, IsVisible: true } activeWindowPopup)
+        {
+            PhysicalRect? listPopupRect = activeWindowPopup.TryGetCardPhysicalRect(out var lr) ? lr : null;
+            if (PopupDismissEvaluator.ShouldDismissOnGlobalMouseDown(
+                    isPopupOpen: true,
+                    isSuppressedByModalDialog: false,
+                    clickScreenX: e.ScreenX,
+                    clickScreenY: e.ScreenY,
+                    popupBoundsPx: listPopupRect))
+            {
+                activeWindowPopup.Dismiss();
+            }
+        }
+
+        UpdateGlobalMouseDismissSubscription();
+    }
+
+    private bool TryGetPowerPopupPhysicalRect(out PhysicalRect rect)
+    {
+        if (TryGetElementPhysicalBounds(PowerMenuCardBorder, out rect))
+            return true;
+
+        if (PowerMenuPopup.Child is Visual popupVisual &&
+            DisplayMonitorService.TryGetVisualHostPhysicalRect(popupVisual, out rect))
+        {
+            return true;
+        }
+
+        rect = default;
+        return false;
+    }
+
+    private static bool TryGetElementPhysicalBounds(FrameworkElement element, out PhysicalRect rect)
+    {
+        rect = default;
+        if (!element.IsVisible || element.ActualWidth <= 0 || element.ActualHeight <= 0)
+            return false;
+        if (PresentationSource.FromVisual(element) is null)
+            return false;
+
+        try
+        {
+            var topLeft = element.PointToScreen(new Point(0, 0));
+            var bottomRight = element.PointToScreen(new Point(element.ActualWidth, element.ActualHeight));
+            var left = (int)Math.Floor(Math.Min(topLeft.X, bottomRight.X));
+            var top = (int)Math.Floor(Math.Min(topLeft.Y, bottomRight.Y));
+            var right = (int)Math.Ceiling(Math.Max(topLeft.X, bottomRight.X));
+            var bottom = (int)Math.Ceiling(Math.Max(topLeft.Y, bottomRight.Y));
+            if (right <= left || bottom <= top)
+                return false;
+
+            rect = new PhysicalRect(left, top, right, bottom);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private void ClosePowerMenuPopup(bool resetClockHighlight = false)
+    {
+        if (PowerMenuPopup.IsOpen)
+            PowerMenuPopup.IsOpen = false;
+
+        if (resetClockHighlight || !DockClockButton.IsMouseOver)
+            DockClockButton.Background = Brushes.Transparent;
+
+        UpdateGlobalMouseDismissSubscription();
+    }
+
+    private void OnPowerPopupOpened(object? sender, EventArgs e)
+    {
+        _suppressNextClockToggleOpen = false;
+        DockClockButton.Background = (Brush)FindResource("DgHoverBrush");
+        UpdateGlobalMouseDismissSubscription();
+    }
+
     private void OnPowerPopupClosed(object? sender, EventArgs e)
     {
+        // Guard against WPF StaysOpen="False" closing on MouseLeftButtonDown over DockClockButton
+        // right before MouseLeftButtonUp fires OnClockClicked (which would otherwise immediately reopen it).
+        if (DockClockButton.IsMouseOver && Mouse.LeftButton == MouseButtonState.Pressed)
+        {
+            _suppressNextClockToggleOpen = true;
+            _suppressClockToggleUntilTick = Environment.TickCount64 + 350;
+        }
+
         if (!DockClockButton.IsMouseOver)
             DockClockButton.Background = Brushes.Transparent;
+
+        UpdateGlobalMouseDismissSubscription();
+    }
+
+    private void OnPowerPopupPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && PowerMenuPopup.IsOpen)
+        {
+            ClosePowerMenuPopup(resetClockHighlight: true);
+            e.Handled = true;
+        }
     }
 
     private void OnClockClicked(object sender, MouseButtonEventArgs e)
@@ -1435,38 +1605,61 @@ public partial class DockWindow : Window
         e.Handled = true;
         PinnedPanel.SmoothResetScales();
         RunningPanel.SmoothResetScales();
-        try { _activePopup?.Close(); } catch { }
+        try { _activePopup?.Dismiss(); } catch { }
         _activePopup = null;
+        UpdateGlobalMouseDismissSubscription();
 
-        PowerMenuPopup.IsOpen = !PowerMenuPopup.IsOpen;
-        if (!PowerMenuPopup.IsOpen && !DockClockButton.IsMouseOver)
-            DockClockButton.Background = Brushes.Transparent;
+        if (_suppressNextClockToggleOpen)
+        {
+            var withinWindow = Environment.TickCount64 <= _suppressClockToggleUntilTick;
+            _suppressNextClockToggleOpen = false;
+            if (withinWindow)
+            {
+                if (!DockClockButton.IsMouseOver)
+                    DockClockButton.Background = Brushes.Transparent;
+                return;
+            }
+        }
+
+        if (PowerMenuPopup.IsOpen)
+        {
+            ClosePowerMenuPopup(resetClockHighlight: false);
+            return;
+        }
+
+        PowerMenuPopup.IsOpen = true;
     }
 
     private void OnPowerLockClick(object sender, RoutedEventArgs e)
     {
-        PowerMenuPopup.IsOpen = false;
-        DockClockButton.Background = Brushes.Transparent;
+        ClosePowerMenuPopup(resetClockHighlight: true);
         SystemPowerService.LockScreen();
     }
 
     private void OnPowerSleepClick(object sender, RoutedEventArgs e)
     {
-        PowerMenuPopup.IsOpen = false;
-        DockClockButton.Background = Brushes.Transparent;
+        ClosePowerMenuPopup(resetClockHighlight: true);
         SystemPowerService.Sleep();
     }
 
     private void OnPowerRestartClick(object sender, RoutedEventArgs e)
     {
-        PowerMenuPopup.IsOpen = false;
-        DockClockButton.Background = Brushes.Transparent;
+        ClosePowerMenuPopup(resetClockHighlight: true);
 
-        var confirm = MessageBox.Show(
-            "确定要立即重启计算机吗？请先保存所有未保存的工作。",
-            "DeskGrid - 重启确认",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
+        _isPowerConfirmDialogOpen = true;
+        MessageBoxResult confirm;
+        try
+        {
+            confirm = MessageBox.Show(
+                "确定要立即重启计算机吗？请先保存所有未保存的工作。",
+                "DeskGrid - 重启确认",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+        }
+        finally
+        {
+            _isPowerConfirmDialogOpen = false;
+        }
 
         if (confirm == MessageBoxResult.Yes)
         {
@@ -1483,14 +1676,22 @@ public partial class DockWindow : Window
 
     private void OnPowerShutdownClick(object sender, RoutedEventArgs e)
     {
-        PowerMenuPopup.IsOpen = false;
-        DockClockButton.Background = Brushes.Transparent;
+        ClosePowerMenuPopup(resetClockHighlight: true);
 
-        var confirm = MessageBox.Show(
-            "确定要立即关闭计算机吗？请先保存所有未保存的工作。",
-            "DeskGrid - 关机确认",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
+        _isPowerConfirmDialogOpen = true;
+        MessageBoxResult confirm;
+        try
+        {
+            confirm = MessageBox.Show(
+                "确定要立即关闭计算机吗？请先保存所有未保存的工作。",
+                "DeskGrid - 关机确认",
+                MessageBoxButton.YesNo,
+                MessageBoxImage.Warning);
+        }
+        finally
+        {
+            _isPowerConfirmDialogOpen = false;
+        }
 
         if (confirm == MessageBoxResult.Yes)
         {

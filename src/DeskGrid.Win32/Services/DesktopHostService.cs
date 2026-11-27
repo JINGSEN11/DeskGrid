@@ -6,6 +6,20 @@ using DeskGrid.Win32.Interop;
 
 namespace DeskGrid.Win32.Services;
 
+public sealed class GlobalMouseButtonEventArgs : EventArgs
+{
+    public GlobalMouseButtonEventArgs(int screenX, int screenY, bool isRightButton)
+    {
+        ScreenX = screenX;
+        ScreenY = screenY;
+        IsRightButton = isRightButton;
+    }
+
+    public int ScreenX { get; }
+    public int ScreenY { get; }
+    public bool IsRightButton { get; }
+}
+
 public sealed class DesktopHostService : IDisposable
 {
     private nint _mouseHook;
@@ -16,6 +30,7 @@ public sealed class DesktopHostService : IDisposable
     private bool _disposed;
 
     public event EventHandler? EmptyDesktopDoubleClicked;
+    public event EventHandler<GlobalMouseButtonEventArgs>? GlobalMouseButtonDown;
 
     public static (nint DesktopHostParent, nint DefView, nint SysListView) FindDesktopShellWindows()
     {
@@ -181,25 +196,42 @@ public sealed class DesktopHostService : IDisposable
 
     private nint LowLevelMouseCallback(int nCode, nint wParam, nint lParam)
     {
-        if (nCode >= 0 && (uint)wParam == NativeMethods.WM_LBUTTONDOWN && lParam != 0)
+        if (nCode >= 0 && lParam != 0)
         {
-            var hookStruct = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
-            var now = Environment.TickCount64;
-            var dblTime = NativeMethods.GetDoubleClickTime();
+            var msg = (uint)wParam;
+            var isLeftDown = msg == NativeMethods.WM_LBUTTONDOWN;
+            var isRightDown = msg == NativeMethods.WM_RBUTTONDOWN;
 
-            var dx = Math.Abs(hookStruct.pt.X - _lastClickPoint.X);
-            var dy = Math.Abs(hookStruct.pt.Y - _lastClickPoint.Y);
-
-            if (now - _lastClickTick <= dblTime && dx <= 6 && dy <= 6)
+            if (isLeftDown || isRightDown)
             {
-                _lastClickTick = 0;
+                var hookStruct = Marshal.PtrToStructure<NativeMethods.MSLLHOOKSTRUCT>(lParam);
                 var pt = hookStruct.pt;
-                _dispatcher?.BeginInvoke(DispatcherPriority.Background, () => CheckAndRaiseEmptyDesktopDoubleClick(pt));
-            }
-            else
-            {
-                _lastClickTick = now;
-                _lastClickPoint = hookStruct.pt;
+
+                if (GlobalMouseButtonDown is not null)
+                {
+                    _dispatcher?.BeginInvoke(DispatcherPriority.Input, () =>
+                        GlobalMouseButtonDown?.Invoke(this, new GlobalMouseButtonEventArgs(pt.X, pt.Y, isRightDown)));
+                }
+
+                if (isLeftDown)
+                {
+                    var now = Environment.TickCount64;
+                    var dblTime = NativeMethods.GetDoubleClickTime();
+
+                    var dx = Math.Abs(pt.X - _lastClickPoint.X);
+                    var dy = Math.Abs(pt.Y - _lastClickPoint.Y);
+
+                    if (now - _lastClickTick <= dblTime && dx <= 6 && dy <= 6)
+                    {
+                        _lastClickTick = 0;
+                        _dispatcher?.BeginInvoke(DispatcherPriority.Background, () => CheckAndRaiseEmptyDesktopDoubleClick(pt));
+                    }
+                    else
+                    {
+                        _lastClickTick = now;
+                        _lastClickPoint = pt;
+                    }
+                }
             }
         }
 

@@ -158,6 +158,23 @@ public static class DisplayMonitorService
         return true;
     }
 
+    public static bool TryGetVisualHostPhysicalRect(System.Windows.Media.Visual visual, out PhysicalRect rect)
+    {
+        rect = default;
+        if (PresentationSource.FromVisual(visual) is not HwndSource source)
+            return false;
+
+        var hwnd = source.Handle;
+        if (hwnd == 0 || !NativeMethods.IsWindow(hwnd))
+            return false;
+
+        if (!NativeMethods.GetWindowRect(hwnd, out var nativeRect))
+            return false;
+
+        rect = new PhysicalRect(nativeRect.Left, nativeRect.Top, nativeRect.Right, nativeRect.Bottom);
+        return true;
+    }
+
     public static bool MoveWindowPhysical(Window window, int physicalLeft, int physicalTop)
     {
         var hwnd = new WindowInteropHelper(window).Handle;
