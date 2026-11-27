@@ -3,7 +3,10 @@ using System.Diagnostics;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Input;
 using System.Windows.Interop;
+using System.Windows.Media;
+using System.Windows.Media.Animation;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using DeskGrid.App.Helpers;
@@ -150,10 +153,71 @@ public partial class SettingsWindow : Window
             WechatQrCard.Visibility = hasWechat ? Visibility.Visible : Visibility.Collapsed;
         if (XhsQrCard is not null)
             XhsQrCard.Visibility = hasXhs ? Visibility.Visible : Visibility.Collapsed;
-        if (QrSpacer is not null)
-            QrSpacer.Visibility = (hasWechat && hasXhs) ? Visibility.Visible : Visibility.Collapsed;
         if (QrCardsContainer is not null)
             QrCardsContainer.Visibility = (hasWechat || hasXhs) ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    private void OnWechatQrClick(object sender, MouseButtonEventArgs e)
+    {
+        if (WechatQrImage?.Source is not ImageSource source)
+            return;
+
+        OpenQrPreview(source, "请我喝杯咖啡 ☕ · 微信赞赏码");
+        e.Handled = true;
+    }
+
+    private void OnXhsQrClick(object sender, MouseButtonEventArgs e)
+    {
+        if (XhsQrImage?.Source is not ImageSource source)
+            return;
+
+        OpenQrPreview(source, "关注小红书 @Coldie.");
+        e.Handled = true;
+    }
+
+    private void OpenQrPreview(ImageSource source, string title)
+    {
+        if (QrPreviewOverlay is null || QrPreviewImage is null)
+            return;
+
+        QrPreviewImage.Source = source;
+        if (QrPreviewTitleText is not null)
+            QrPreviewTitleText.Text = title;
+
+        QrPreviewOverlay.BeginAnimation(OpacityProperty, null);
+        QrPreviewOverlay.Opacity = 0.0;
+        QrPreviewOverlay.Visibility = Visibility.Visible;
+
+        var fadeIn = new DoubleAnimation(0.0, 1.0, TimeSpan.FromMilliseconds(140))
+        {
+            EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+        };
+        QrPreviewOverlay.BeginAnimation(OpacityProperty, fadeIn);
+    }
+
+    private void CloseQrPreview()
+    {
+        if (QrPreviewOverlay is null || QrPreviewOverlay.Visibility != Visibility.Visible)
+            return;
+
+        QrPreviewOverlay.BeginAnimation(OpacityProperty, null);
+        QrPreviewOverlay.Visibility = Visibility.Collapsed;
+        QrPreviewOverlay.Opacity = 1.0;
+    }
+
+    private void OnCloseQrPreview(object sender, MouseButtonEventArgs e)
+    {
+        CloseQrPreview();
+        e.Handled = true;
+    }
+
+    private void OnWindowPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Escape && QrPreviewOverlay is { Visibility: Visibility.Visible })
+        {
+            CloseQrPreview();
+            e.Handled = true;
+        }
     }
 
     private static BitmapImage? TryLoadAssetImage(string fileName)

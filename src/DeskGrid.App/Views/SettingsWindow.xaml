@@ -4,8 +4,8 @@
         Title="DeskGrid 偏好设置"
         Icon="pack://application:,,,/Assets/app.ico"
         Foreground="{DynamicResource DgSettingsTextPrimaryBrush}"
-        Width="780"
-        Height="620"
+        Width="820"
+        Height="640"
         MinWidth="680"
         MinHeight="500"
         ShowInTaskbar="True"
@@ -14,6 +14,7 @@
         SnapsToDevicePixels="True"
         TextOptions.TextFormattingMode="Ideal"
         TextOptions.TextRenderingMode="ClearType"
+        PreviewKeyDown="OnWindowPreviewKeyDown"
         Closing="OnWindowClosing">
     <Window.Resources>
         <Style x:Key="DgSettingsNavRadioStyle" TargetType="RadioButton">
@@ -137,7 +138,8 @@
         </Style>
     </Window.Resources>
 
-    <Grid Margin="20">
+    <Grid>
+        <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
@@ -553,19 +555,31 @@
                                            LineHeight="20"
                                            Margin="0,0,0,16"/>
 
-                                <StackPanel x:Name="QrCardsContainer"
-                                            Orientation="Horizontal"
-                                            HorizontalAlignment="Center">
+                                <WrapPanel x:Name="QrCardsContainer"
+                                           Orientation="Horizontal"
+                                           HorizontalAlignment="Center">
                                     <!-- 左侧：微信赞赏 -->
-                                    <StackPanel x:Name="WechatQrCard" HorizontalAlignment="Center" Width="184">
-                                        <Border Background="#FFFFFF"
-                                                CornerRadius="12"
-                                                Padding="8"
-                                                HorizontalAlignment="Center">
+                                    <StackPanel x:Name="WechatQrCard"
+                                                HorizontalAlignment="Center"
+                                                Margin="8,0,8,12">
+                                        <Border x:Name="WechatQrFrame"
+                                                Background="#FFFFFF"
+                                                BorderBrush="#1A000000"
+                                                BorderThickness="1"
+                                                CornerRadius="14"
+                                                Padding="12"
+                                                HorizontalAlignment="Center"
+                                                Cursor="Hand"
+                                                ToolTip="点击放大查看高清微信赞赏码"
+                                                SnapsToDevicePixels="True"
+                                                UseLayoutRounding="True"
+                                                MouseLeftButtonUp="OnWechatQrClick">
                                             <Image x:Name="WechatQrImage"
-                                                   Width="150"
-                                                   Height="150"
+                                                   Width="220"
+                                                   Height="220"
                                                    Stretch="Uniform"
+                                                   SnapsToDevicePixels="True"
+                                                   UseLayoutRounding="True"
                                                    RenderOptions.BitmapScalingMode="HighQuality"/>
                                         </Border>
                                         <TextBlock Text="请我喝杯咖啡 ☕"
@@ -573,24 +587,36 @@
                                                    FontWeight="SemiBold"
                                                    HorizontalAlignment="Center"
                                                    Margin="0,10,0,2"/>
-                                        <TextBlock Text="自愿赞赏 · 支持持续更新"
+                                        <TextBlock Text="自愿赞赏 · 点击放大"
                                                    FontSize="12"
                                                    Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
-                                                   HorizontalAlignment="Center"/>
+                                                   HorizontalAlignment="Center"
+                                                   Cursor="Hand"
+                                                   MouseLeftButtonUp="OnWechatQrClick"/>
                                     </StackPanel>
 
-                                    <Border x:Name="QrSpacer" Width="28"/>
-
                                     <!-- 右侧：小红书主页 -->
-                                    <StackPanel x:Name="XhsQrCard" HorizontalAlignment="Center" Width="184">
-                                        <Border Background="#FFFFFF"
-                                                CornerRadius="12"
-                                                Padding="8"
-                                                HorizontalAlignment="Center">
+                                    <StackPanel x:Name="XhsQrCard"
+                                                HorizontalAlignment="Center"
+                                                Margin="8,0,8,12">
+                                        <Border x:Name="XhsQrFrame"
+                                                Background="#FFFFFF"
+                                                BorderBrush="#1A000000"
+                                                BorderThickness="1"
+                                                CornerRadius="14"
+                                                Padding="12"
+                                                HorizontalAlignment="Center"
+                                                Cursor="Hand"
+                                                ToolTip="点击放大查看高清小红书二维码"
+                                                SnapsToDevicePixels="True"
+                                                UseLayoutRounding="True"
+                                                MouseLeftButtonUp="OnXhsQrClick">
                                             <Image x:Name="XhsQrImage"
-                                                   Width="150"
-                                                   Height="150"
+                                                   Width="220"
+                                                   Height="220"
                                                    Stretch="Uniform"
+                                                   SnapsToDevicePixels="True"
+                                                   UseLayoutRounding="True"
                                                    RenderOptions.BitmapScalingMode="HighQuality"/>
                                         </Border>
                                         <TextBlock Text="关注小红书 @Coldie."
@@ -598,12 +624,14 @@
                                                    FontWeight="SemiBold"
                                                    HorizontalAlignment="Center"
                                                    Margin="0,10,0,2"/>
-                                        <TextBlock Text="追更版本动态 · 进群反馈 Bug"
+                                        <TextBlock Text="追更动态与反馈 · 点击放大"
                                                    FontSize="12"
                                                    Foreground="{DynamicResource DgSettingsTextSecondaryBrush}"
-                                                   HorizontalAlignment="Center"/>
+                                                   HorizontalAlignment="Center"
+                                                   Cursor="Hand"
+                                                   MouseLeftButtonUp="OnXhsQrClick"/>
                                     </StackPanel>
-                                </StackPanel>
+                                </WrapPanel>
                             </StackPanel>
                         </Border>
                     </StackPanel>
@@ -614,5 +642,61 @@
         <StackPanel Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,12,0,0">
             <Button Content="完成" Width="88" Height="32" IsDefault="True" Click="OnClose"/>
         </StackPanel>
+        </Grid>
+
+        <!-- Full-window centered QR zoom preview overlay (click backdrop/card or press Esc to close) -->
+        <Grid x:Name="QrPreviewOverlay"
+              Panel.ZIndex="100"
+              Background="#CC0B0D12"
+              Visibility="Collapsed"
+              Cursor="Hand"
+              MouseLeftButtonUp="OnCloseQrPreview">
+            <StackPanel HorizontalAlignment="Center"
+                        VerticalAlignment="Center"
+                        Cursor="Hand"
+                        MouseLeftButtonUp="OnCloseQrPreview">
+                <Grid HorizontalAlignment="Center">
+                    <!-- Dedicated sibling shadow so the foreground QR Image stays razor-sharp with zero effect rasterization -->
+                    <Border Background="#FFFFFF"
+                            CornerRadius="18"
+                            IsHitTestVisible="False">
+                        <Border.Effect>
+                            <DropShadowEffect BlurRadius="32"
+                                              ShadowDepth="8"
+                                              Direction="270"
+                                              Opacity="0.45"
+                                              Color="#000000"/>
+                        </Border.Effect>
+                    </Border>
+                    <Border Background="#FFFFFF"
+                            BorderBrush="#1F000000"
+                            BorderThickness="1"
+                            CornerRadius="18"
+                            Padding="18"
+                            SnapsToDevicePixels="True"
+                            UseLayoutRounding="True">
+                        <Image x:Name="QrPreviewImage"
+                               Width="320"
+                               Height="320"
+                               Stretch="Uniform"
+                               SnapsToDevicePixels="True"
+                               UseLayoutRounding="True"
+                               RenderOptions.BitmapScalingMode="HighQuality"/>
+                    </Border>
+                </Grid>
+
+                <TextBlock x:Name="QrPreviewTitleText"
+                           FontSize="16"
+                           FontWeight="SemiBold"
+                           Foreground="#FFFFFF"
+                           HorizontalAlignment="Center"
+                           Margin="0,16,0,4"/>
+                <TextBlock x:Name="QrPreviewSubtitleText"
+                           Text="点击任意位置或按 Esc 关闭"
+                           FontSize="12.5"
+                           Foreground="#C8F3F4F6"
+                           HorizontalAlignment="Center"/>
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>
