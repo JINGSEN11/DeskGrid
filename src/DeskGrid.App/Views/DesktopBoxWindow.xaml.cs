@@ -318,15 +318,14 @@ public partial class DesktopBoxWindow : Window
 
         var dpi = VisualTreeHelper.GetDpi(this);
         var requestPx = ShellIconService.ComputePhysicalIconPixels(iconPx, Math.Max(dpi.DpiScaleX, dpi.DpiScaleY));
-        var iconBitmap = _shellService.GetIconForPath(item.TargetPath, requestPx);
-        if (iconBitmap is not null)
+        if (_shellService.TryGetCachedIconForPath(item.TargetPath, requestPx, out var cachedBitmap) && cachedBitmap is not null)
         {
-            img.Source = iconBitmap;
+            img.Source = cachedBitmap;
             iconContainer.Children.Add(img);
         }
         else
         {
-            iconContainer.Children.Add(new TextBlock
+            var placeholder = new TextBlock
             {
                 Text = item.Kind == BoxItemKind.Folder ? "\uE8B7" : item.Kind == BoxItemKind.Url ? "\uE774" : "\uE8A5",
                 FontFamily = new FontFamily("Segoe Fluent Icons, Segoe MDL2 Assets"),
@@ -335,6 +334,36 @@ public partial class DesktopBoxWindow : Window
                 VerticalAlignment = VerticalAlignment.Center,
                 Foreground = (Brush)FindResource("DgAccentBrush"),
                 Opacity = item.IsMissing ? 0.42 : 0.92
+            };
+            iconContainer.Children.Add(placeholder);
+
+            var targetPath = item.TargetPath;
+            _ = Task.Run(async () =>
+            {
+                try
+                {
+                    var loaded = await _shellService.GetIconForPathAsync(targetPath, requestPx).ConfigureAwait(false);
+                    if (loaded is null)
+                        return;
+
+                    _ = Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+                    {
+                        if (!IsLoaded)
+                            return;
+
+                        img.Source = loaded;
+                        var idx = iconContainer.Children.IndexOf(placeholder);
+                        if (idx >= 0)
+                        {
+                            iconContainer.Children.RemoveAt(idx);
+                            iconContainer.Children.Insert(idx, img);
+                        }
+                    });
+                }
+                catch
+                {
+                    // Keep fallback glyph if extraction fails
+                }
             });
         }
 

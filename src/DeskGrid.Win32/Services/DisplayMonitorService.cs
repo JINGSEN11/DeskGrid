@@ -3,87 +3,73 @@ using System.Windows;
 using System.Windows.Interop;
 using DeskGrid.Core.Services;
 using DeskGrid.Win32.Interop;
-using FormsScreen = System.Windows.Forms.Screen;
 
 namespace DeskGrid.Win32.Services;
 
 /// <summary>
-/// Enumerates physical monitors via System.Windows.Forms.Screen.AllScreens with accurate
-/// per-monitor DPI scaling and provides PerMonitorV2-safe physical window positioning helpers.
+/// Caches physical monitor geometry and per-monitor DPI in memory using native Win32
+/// EnumDisplayMonitors / GetMonitorInfo / GetDpiForMonitor.
+/// Eliminates high-frequency GDI/WinForms Screen.AllScreens enumeration from all timers.
 /// </summary>
 public static class DisplayMonitorService
 {
-    public static IReadOnlyList<DisplayMonitorInfo> GetAllMonitors()
+    private static readonly object CacheLock = new();
+    private static IReadOnlyList<DisplayMonitorInfo> _cachedMonitors = [];
+    private static bool _cacheInitialized;
+
+    /// <summary>
+    /// Returns the in-memory cached monitor list with zero GDI/Win32 calls on hot paths.
+    /// Automatically populates once on first access if RefreshMonitors() has not yet been called.
+    /// </summary>
+    public static IReadOnlyList<DisplayMonitorInfo> GetCachedMonitors()
     {
-        var result = new List<DisplayMonitorInfo>();
-
-        try
+        lock (CacheLock)
         {
-            var screens = FormsScreen.AllScreens;
-            for (var i = 0; i < screens.Length; i++)
-            {
-                var screen = screens[i];
-                var bounds = screen.Bounds;
-                var work = screen.WorkingArea;
-
-                var centerPt = new NativeMethods.POINT
-                {
-                    X = bounds.Left + Math.Max(0, bounds.Width / 2),
-                    Y = bounds.Top + Math.Max(0, bounds.Height / 2)
-                };
-                var hMonitor = NativeMethods.MonitorFromPoint(centerPt, NativeMethods.MONITOR_DEFAULTTONEAREST);
-
-                var (dpiScaleX, dpiScaleY) = QueryMonitorDpiScale(hMonitor);
-                var deviceName = !string.IsNullOrWhiteSpace(screen.DeviceName)
-                    ? screen.DeviceName
-                    : $"DISPLAY_{i + 1}";
-
-                result.Add(new DisplayMonitorInfo(
-                    DeviceName: deviceName,
-                    Handle: hMonitor,
-                    IsPrimary: screen.Primary,
-                    BoundsPx: new PhysicalRect(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom),
-                    WorkingAreaPx: new PhysicalRect(work.Left, work.Top, work.Right, work.Bottom),
-                    DpiScaleX: dpiScaleX,
-                    DpiScaleY: dpiScaleY));
-            }
-        }
-        catch
-        {
-            // Fallback below if WinForms Screen enumeration fails in headless/unusual environments
+            if (_cacheInitialized && _cachedMonitors.Count > 0)
+                return _cachedMonitors;
         }
 
-        if (result.Count == 0)
+        return RefreshMonitors();
+    }
+
+    /// <summary>
+    /// Returns cached monitors by default; pass forceRefresh: true only on startup,
+    /// SystemEvents.DisplaySettingsChanged, or taskbar work-area transitions.
+    /// </summary>
+    public static IReadOnlyList<DisplayMonitorInfo> GetAllMonitors(bool forceRefresh = false)
+    {
+        return forceRefresh ? RefreshMonitors() : GetCachedMonitors();
+    }
+
+    /// <summary>
+    /// Re-enumerates physical monitors via Win32 EnumDisplayMonitors + GetMonitorInfo + GetDpiForMonitor
+    /// and updates the in-memory cache atomically.
+    /// </summary>
+    public static IReadOnlyList<DisplayMonitorInfo> RefreshMonitors()
+    {
+        var enumerated = EnumerateNativeMonitors();
+        if (enumerated.Count == 0)
+            enumerated.Add(BuildFallbackPrimaryMonitor());
+
+        var snapshot = enumerated.ToArray();
+        lock (CacheLock)
         {
-            var w = (int)Math.Max(800, Math.Round(SystemParameters.PrimaryScreenWidth));
-            var h = (int)Math.Max(600, Math.Round(SystemParameters.PrimaryScreenHeight));
-            var work = SystemParameters.WorkArea;
-            result.Add(new DisplayMonitorInfo(
-                DeviceName: "PRIMARY",
-                Handle: 0,
-                IsPrimary: true,
-                BoundsPx: new PhysicalRect(0, 0, w, h),
-                WorkingAreaPx: new PhysicalRect(
-                    (int)Math.Round(work.Left),
-                    (int)Math.Round(work.Top),
-                    (int)Math.Round(work.Right),
-                    (int)Math.Round(work.Bottom)),
-                DpiScaleX: 1.0,
-                DpiScaleY: 1.0));
+            _cachedMonitors = snapshot;
+            _cacheInitialized = true;
         }
 
-        return result;
+        return snapshot;
     }
 
     public static DisplayMonitorInfo GetPrimaryMonitor()
     {
-        var monitors = GetAllMonitors();
+        var monitors = GetCachedMonitors();
         return monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors[0];
     }
 
     public static DisplayMonitorInfo GetMonitorForCursor(IReadOnlyList<DisplayMonitorInfo>? cachedMonitors = null)
     {
-        var monitors = cachedMonitors is { Count: > 0 } ? cachedMonitors : GetAllMonitors();
+        var monitors = cachedMonitors is { Count: > 0 } ? cachedMonitors : GetCachedMonitors();
         if (DesktopHostService.TryGetCursorScreenPosition(out var x, out var y))
         {
             var hit = DockPositionCalculator.FindMonitorForPoint(monitors, x, y);
@@ -92,6 +78,70 @@ public static class DisplayMonitorService
         }
 
         return monitors.FirstOrDefault(m => m.IsPrimary) ?? monitors[0];
+    }
+
+    /// <summary>
+    /// Resolves a monitor's live physical bounds, working area, and DPI directly via Win32 GetMonitorInfo.
+    /// Never falls back to SystemParameters.WorkArea for secondary displays.
+    /// </summary>
+    public static bool TryGetMonitorInfoByHandle(nint hMonitor, out DisplayMonitorInfo monitor)
+    {
+        monitor = null!;
+        if (hMonitor == 0)
+            return false;
+
+        try
+        {
+            var mi = new NativeMethods.MONITORINFOEX
+            {
+                cbSize = Marshal.SizeOf<NativeMethods.MONITORINFOEX>()
+            };
+
+            if (!NativeMethods.GetMonitorInfoEx(hMonitor, ref mi))
+                return false;
+
+            var (dpiScaleX, dpiScaleY) = QueryMonitorDpiScale(hMonitor);
+            var deviceName = !string.IsNullOrWhiteSpace(mi.szDevice)
+                ? mi.szDevice
+                : $"DISPLAY_{hMonitor}";
+
+            monitor = new DisplayMonitorInfo(
+                DeviceName: deviceName,
+                Handle: hMonitor,
+                IsPrimary: (mi.dwFlags & NativeMethods.MONITORINFOF_PRIMARY) != 0,
+                BoundsPx: new PhysicalRect(mi.rcMonitor.Left, mi.rcMonitor.Top, mi.rcMonitor.Right, mi.rcMonitor.Bottom),
+                WorkingAreaPx: new PhysicalRect(mi.rcWork.Left, mi.rcWork.Top, mi.rcWork.Right, mi.rcWork.Bottom),
+                DpiScaleX: dpiScaleX,
+                DpiScaleY: dpiScaleY);
+            return true;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Queries the monitor currently hosting a WPF Window via Win32 MonitorFromWindow + GetMonitorInfo.
+    /// </summary>
+    public static bool TryGetMonitorInfoForWindow(Window window, out DisplayMonitorInfo monitor)
+    {
+        monitor = null!;
+        var hwnd = new WindowInteropHelper(window).Handle;
+        if (hwnd == 0 || !NativeMethods.IsWindow(hwnd))
+            return false;
+
+        var hMonitor = NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        return TryGetMonitorInfoByHandle(hMonitor, out monitor);
+    }
+
+    public static nint GetWindowMonitorHandle(Window window)
+    {
+        var hwnd = new WindowInteropHelper(window).Handle;
+        if (hwnd == 0 || !NativeMethods.IsWindow(hwnd))
+            return 0;
+
+        return NativeMethods.MonitorFromWindow(hwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
     }
 
     public static bool TryGetWindowPhysicalRect(Window window, out PhysicalRect rect)
@@ -138,6 +188,83 @@ public static class DisplayMonitorService
             0,
             0,
             NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+    }
+
+    private static List<DisplayMonitorInfo> EnumerateNativeMonitors()
+    {
+        var result = new List<DisplayMonitorInfo>();
+
+        try
+        {
+            var index = 0;
+            NativeMethods.EnumDisplayMonitors(
+                0,
+                0,
+                (nint hMonitor, nint _, ref NativeMethods.RECT _, nint _) =>
+                {
+                    index++;
+                    if (TryGetMonitorInfoByHandle(hMonitor, out var info))
+                    {
+                        result.Add(info);
+                    }
+                    else
+                    {
+                        var mi = new NativeMethods.MONITORINFO
+                        {
+                            cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>()
+                        };
+                        if (NativeMethods.GetMonitorInfo(hMonitor, ref mi))
+                        {
+                            var (dpiX, dpiY) = QueryMonitorDpiScale(hMonitor);
+                            result.Add(new DisplayMonitorInfo(
+                                DeviceName: $"DISPLAY_{index}",
+                                Handle: hMonitor,
+                                IsPrimary: (mi.dwFlags & NativeMethods.MONITORINFOF_PRIMARY) != 0,
+                                BoundsPx: new PhysicalRect(mi.rcMonitor.Left, mi.rcMonitor.Top, mi.rcMonitor.Right, mi.rcMonitor.Bottom),
+                                WorkingAreaPx: new PhysicalRect(mi.rcWork.Left, mi.rcWork.Top, mi.rcWork.Right, mi.rcWork.Bottom),
+                                DpiScaleX: dpiX,
+                                DpiScaleY: dpiY));
+                        }
+                    }
+
+                    return true;
+                },
+                0);
+        }
+        catch
+        {
+            // Fallback handled by caller
+        }
+
+        // Stable ordering: primary first, then left-to-right, top-to-bottom
+        result.Sort((a, b) =>
+        {
+            var primaryCmp = b.IsPrimary.CompareTo(a.IsPrimary);
+            if (primaryCmp != 0) return primaryCmp;
+            var leftCmp = a.BoundsPx.Left.CompareTo(b.BoundsPx.Left);
+            return leftCmp != 0 ? leftCmp : a.BoundsPx.Top.CompareTo(b.BoundsPx.Top);
+        });
+
+        return result;
+    }
+
+    private static DisplayMonitorInfo BuildFallbackPrimaryMonitor()
+    {
+        var w = (int)Math.Max(800, Math.Round(SystemParameters.PrimaryScreenWidth));
+        var h = (int)Math.Max(600, Math.Round(SystemParameters.PrimaryScreenHeight));
+        var work = SystemParameters.WorkArea;
+        return new DisplayMonitorInfo(
+            DeviceName: "PRIMARY",
+            Handle: 0,
+            IsPrimary: true,
+            BoundsPx: new PhysicalRect(0, 0, w, h),
+            WorkingAreaPx: new PhysicalRect(
+                (int)Math.Round(work.Left),
+                (int)Math.Round(work.Top),
+                (int)Math.Round(work.Right),
+                (int)Math.Round(work.Bottom)),
+            DpiScaleX: 1.0,
+            DpiScaleY: 1.0);
     }
 
     private static (double ScaleX, double ScaleY) QueryMonitorDpiScale(nint hMonitor)

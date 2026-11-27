@@ -33,6 +33,12 @@ public sealed class DockEdgeRevealStateMachine
 
     public DockEdgeRevealVisualState State { get; private set; } = DockEdgeRevealVisualState.Normal;
 
+    /// <summary>
+    /// True while a dwell-to-reveal or delay-to-hide countdown is actively ticking.
+    /// Allows high-level cursor polling to skip completely when cursor coordinates are stationary and no timer is pending.
+    /// </summary>
+    public bool HasPendingTransition => _edgeEnterTimestampMs.HasValue || _dockLeaveTimestampMs.HasValue;
+
     public DockEdgeRevealStateMachine(
         int revealDwellMs = DefaultRevealDwellMs,
         int hideDelayMs = DefaultHideDelayMs)

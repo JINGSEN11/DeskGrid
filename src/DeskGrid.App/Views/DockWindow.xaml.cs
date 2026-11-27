@@ -2,8 +2,10 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Animation;
+using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using DeskGrid.App.Controls;
 using DeskGrid.App.Helpers;
@@ -33,11 +35,17 @@ public partial class DockWindow : Window
 
     private readonly DispatcherTimer _clockTimer;
     private readonly DockEdgeRevealStateMachine _edgeRevealStateMachine = new();
+    private readonly DockPositionGuard _positionGuard = new();
+    private CancellationTokenSource _iconLoadCts = new();
     private DisplayMonitorInfo _targetMonitor;
     private DockLayoutMetrics _layoutMetrics;
+    private PhysicalRect? _cachedWindowPhysicalRect;
+    private nint _registeredHwnd;
     private bool _isFullscreenOnMonitor;
     private bool _baselineTopmost = true;
     private bool _isClosed;
+    private bool _repositionScheduled;
+    private bool _dpiRefreshScheduled;
     private int _fadeAnimationGeneration;
 
     private string _lastClockTimeText = string.Empty;
@@ -58,6 +66,7 @@ public partial class DockWindow : Window
     public bool IsClosed => _isClosed;
     public bool IsFullscreenHidden => _isFullscreenOnMonitor && _appConfig.Dock.AutoHideOnFullscreen;
     public bool IsTemporarilyRevealed => _edgeRevealStateMachine.State == DockEdgeRevealVisualState.TemporarilyRevealed;
+    public bool HasActiveEdgeRevealCountdown => _edgeRevealStateMachine.HasPendingTransition;
     public bool HasActiveOverlay =>
         PowerMenuPopup.IsOpen ||
         (_activeContextMenu is { IsOpen: true }) ||
@@ -93,6 +102,15 @@ public partial class DockWindow : Window
         _baselineTopmost = Topmost;
         WindowStartupLocation = WindowStartupLocation.Manual;
 
+        // Initialize DIP coordinates inside target monitor bounds before HWND creation to avoid primary-to-secondary flash
+        var initialPlacement = DockPositionCalculator.CalculateBottomPlacement(
+            _targetMonitor,
+            windowDipWidth: 420,
+            windowDipHeight: 110,
+            autoHideSystemTaskbar: _appConfig.Dock.AutoHideSystemTaskbar);
+        Left = initialPlacement.DipLeft;
+        Top = initialPlacement.DipTop;
+
         _layoutMetrics = ComputeCurrentLayoutMetrics();
         ApplyLayoutMetricsToChrome(_layoutMetrics);
 
@@ -104,31 +122,83 @@ public partial class DockWindow : Window
 
         SourceInitialized += (_, _) =>
         {
+            if (_isClosed)
+                return;
+
             DesktopHostService.ConfigureFloatingDockWindow(this);
-            RepositionDock();
+            _registeredHwnd = new WindowInteropHelper(this).Handle;
+            if (_registeredHwnd != 0)
+                _windowTracker.RegisterExcludedWindow(_registeredHwnd);
+
+            // Pre-position HWND directly onto target monitor in physical coordinates before WPF completes layout/DPI negotiation
+            _positionGuard.TryExecute(() =>
+            {
+                var pre = DockPositionCalculator.CalculateBottomPlacement(
+                    _targetMonitor,
+                    ActualWidth > 0 ? ActualWidth : 420,
+                    ActualHeight > 0 ? ActualHeight : 110,
+                    _appConfig.Dock.AutoHideSystemTaskbar);
+                DisplayMonitorService.MoveWindowPhysical(this, pre.PhysicalLeft, pre.PhysicalTop);
+            });
         };
         Loaded += (_, _) =>
         {
+            if (_isClosed)
+                return;
+
             ApplySettings();
             RefreshDock();
-            RepositionDock();
+            ScheduleReposition();
         };
-        ContentRendered += (_, _) => RepositionDock();
-        SizeChanged += (_, _) => RepositionDock();
-        Closed += (_, _) =>
+        ContentRendered += (_, _) => ScheduleReposition();
+        SizeChanged += (_, _) =>
         {
-            _isClosed = true;
-            _clockTimer.Stop();
-            PowerMenuPopup.IsOpen = false;
-            CloseActiveContextMenu();
-            try { _activePopup?.Close(); } catch { }
-            _activePopup = null;
+            if (!_isClosed && !_positionGuard.IsUpdatingPosition)
+                ScheduleReposition();
         };
+        LocationChanged += (_, _) =>
+        {
+            if (!_isClosed && IsLoaded && !_positionGuard.IsUpdatingPosition)
+                ScheduleReposition();
+        };
+        Closed += (_, _) => CleanupBeforeClose();
+    }
+
+    /// <summary>
+    /// Detaches all timers, CompositionTarget.Rendering hooks, window tracker registration,
+    /// async icon callbacks, and overlays immediately so old Dock instances can be closed safely.
+    /// </summary>
+    public void CleanupBeforeClose()
+    {
+        _isClosed = true;
+        _repositionScheduled = false;
+        _dpiRefreshScheduled = false;
+
+        try { _iconLoadCts.Cancel(); } catch { }
+        try { _iconLoadCts.Dispose(); } catch { }
+        _iconLoadCts = new CancellationTokenSource();
+
+        if (_registeredHwnd != 0)
+        {
+            _windowTracker.UnregisterExcludedWindow(_registeredHwnd);
+            _registeredHwnd = 0;
+        }
+
+        _clockTimer.Stop();
+        PinnedPanel.StopAndCleanup();
+        RunningPanel.StopAndCleanup();
+        CancelFadeAnimation();
+        PowerMenuPopup.IsOpen = false;
+        CloseActiveContextMenu();
+        try { _activePopup?.Close(); } catch { }
+        _activePopup = null;
     }
 
     public void SetTargetMonitor(DisplayMonitorInfo monitor, bool smoothTransition = false)
     {
         ArgumentNullException.ThrowIfNull(monitor);
+        if (_isClosed)
+            return;
 
         var monitorChanged =
             _targetMonitor.Handle != monitor.Handle ||
@@ -158,11 +228,36 @@ public partial class DockWindow : Window
     protected override void OnDpiChanged(DpiScale oldDpi, DpiScale newDpi)
     {
         base.OnDpiChanged(oldDpi, newDpi);
-        if (IsLoaded)
+        if (_isClosed || !IsLoaded)
+            return;
+
+        if (Math.Abs(oldDpi.DpiScaleX - newDpi.DpiScaleX) < 0.01 &&
+            Math.Abs(oldDpi.DpiScaleY - newDpi.DpiScaleY) < 0.01)
         {
+            return;
+        }
+
+        // Never synchronously call UpdateLayout/SetWindowPos/COM icon loading inside WM_DPICHANGED
+        // to eliminate cross-monitor DPI ping-pong deadlocks.
+        if (_dpiRefreshScheduled)
+            return;
+
+        _dpiRefreshScheduled = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            _dpiRefreshScheduled = false;
+            if (_isClosed || !IsLoaded)
+                return;
+
+            if (_targetMonitor.Handle != 0 &&
+                DisplayMonitorService.TryGetMonitorInfoByHandle(_targetMonitor.Handle, out var refreshed))
+            {
+                _targetMonitor = refreshed;
+            }
+
             RefreshDock(forceIconReload: true);
             RepositionDock();
-        }
+        });
     }
 
     private DockLayoutMetrics ComputeCurrentLayoutMetrics(double? overrideDockScale = null, double? overrideMaxMagScale = null)
@@ -474,22 +569,89 @@ public partial class DockWindow : Window
         return true;
     }
 
+    public void ScheduleReposition()
+    {
+        if (_isClosed || _repositionScheduled)
+            return;
+
+        _repositionScheduled = true;
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
+        {
+            _repositionScheduled = false;
+            if (!_isClosed && IsLoaded)
+                RepositionDock();
+        });
+    }
+
     public void RepositionDock()
     {
-        if (_isClosed || !IsLoaded) return;
+        if (_isClosed || !IsLoaded || _positionGuard.IsUpdatingPosition)
+            return;
 
-        UpdateLayout();
+        var dipWidth = ActualWidth;
+        var dipHeight = ActualHeight;
+        if (!double.IsFinite(dipWidth) || dipWidth <= 0 || !double.IsFinite(dipHeight) || dipHeight <= 0)
+        {
+            ScheduleReposition();
+            return;
+        }
+
+        // Bind strictly to this DockWindow's target monitor work area via Win32 GetMonitorInfo
+        // (NEVER SystemParameters.WorkArea, which pulls secondary-monitor docks back to primary).
+        var monitor = _targetMonitor;
+        if (monitor.Handle != 0 && DisplayMonitorService.TryGetMonitorInfoByHandle(monitor.Handle, out var liveTarget))
+        {
+            monitor = liveTarget;
+            _targetMonitor = liveTarget;
+        }
+        else if (monitor.Handle == 0 && DisplayMonitorService.TryGetMonitorInfoForWindow(this, out var hostMonitor))
+        {
+            monitor = hostMonitor;
+            _targetMonitor = hostMonitor;
+        }
+
         var placement = DockPositionCalculator.CalculateBottomPlacement(
-            _targetMonitor,
-            ActualWidth,
-            ActualHeight,
+            monitor,
+            dipWidth,
+            dipHeight,
             _appConfig.Dock.AutoHideSystemTaskbar);
 
-        if (!DisplayMonitorService.MoveWindowPhysical(this, placement.PhysicalLeft, placement.PhysicalTop))
+        _positionGuard.TryExecute(() =>
         {
+            var hasPhysicalRect = DisplayMonitorService.TryGetWindowPhysicalRect(this, out var currentRect);
+            var currentMonitorHandle = DisplayMonitorService.GetWindowMonitorHandle(this);
+            var onTargetMonitor = monitor.Handle == 0 || currentMonitorHandle == monitor.Handle;
+
+            if (hasPhysicalRect)
+            {
+                _cachedWindowPhysicalRect = currentRect;
+                if (onTargetMonitor &&
+                    !DockPositionGuard.ShouldUpdatePhysicalPosition(currentRect, placement.PhysicalLeft, placement.PhysicalTop))
+                {
+                    return;
+                }
+            }
+
+            if (DisplayMonitorService.MoveWindowPhysical(this, placement.PhysicalLeft, placement.PhysicalTop))
+            {
+                if (DisplayMonitorService.TryGetWindowPhysicalRect(this, out var updatedRect))
+                    _cachedWindowPhysicalRect = updatedRect;
+                else
+                    _cachedWindowPhysicalRect = new PhysicalRect(
+                        placement.PhysicalLeft,
+                        placement.PhysicalTop,
+                        placement.PhysicalLeft + placement.PhysicalWidth,
+                        placement.PhysicalTop + placement.PhysicalHeight);
+                return;
+            }
+
+            // Fallback when HWND is unavailable: apply DIP coordinates only if delta >= 0.5 DIP
+            if (!DockPositionGuard.ShouldUpdateDipPosition(Left, Top, placement.DipLeft, placement.DipTop))
+                return;
+
             Left = placement.DipLeft;
             Top = placement.DipTop;
-        }
+        });
     }
 
     public void SetFullscreenHidden(bool isFullscreenOnMonitor)
@@ -497,6 +659,7 @@ public partial class DockWindow : Window
         if (_isClosed)
             return;
 
+        var previousFullscreen = _isFullscreenOnMonitor;
         _isFullscreenOnMonitor = isFullscreenOnMonitor;
 
         if (!_appConfig.ShowDock || !_appConfig.Dock.Enabled)
@@ -509,6 +672,9 @@ public partial class DockWindow : Window
         var shouldHideForFullscreen = isFullscreenOnMonitor && _appConfig.Dock.AutoHideOnFullscreen;
         if (!shouldHideForFullscreen)
         {
+            if (!previousFullscreen && IsVisible && _edgeRevealStateMachine.State == DockEdgeRevealVisualState.Normal)
+                return;
+
             _edgeRevealStateMachine.Reset(isFullscreenHidden: false);
             RestoreNormalVisibility();
             return;
@@ -536,9 +702,19 @@ public partial class DockWindow : Window
             cursorY,
             edgeTolerancePx: 2);
 
-        var isInsideDock = IsVisible &&
-                           DisplayMonitorService.TryGetWindowPhysicalRect(this, out var winRect) &&
-                           winRect.Contains(cursorX, cursorY);
+        var isInsideDock = false;
+        if (IsVisible)
+        {
+            if (_cachedWindowPhysicalRect.HasValue)
+            {
+                isInsideDock = _cachedWindowPhysicalRect.Value.Contains(cursorX, cursorY);
+            }
+            else if (DisplayMonitorService.TryGetWindowPhysicalRect(this, out var winRect))
+            {
+                _cachedWindowPhysicalRect = winRect;
+                isInsideDock = winRect.Contains(cursorX, cursorY);
+            }
+        }
 
         var step = _edgeRevealStateMachine.Update(
             nowMs: nowMs,
@@ -648,6 +824,8 @@ public partial class DockWindow : Window
     {
         CancelFadeAnimation();
         _clockTimer.Stop();
+        PinnedPanel.StopAndCleanup();
+        RunningPanel.StopAndCleanup();
         PowerMenuPopup.IsOpen = false;
         CloseActiveContextMenu();
         try { _activePopup?.Close(); } catch { }
@@ -693,9 +871,9 @@ public partial class DockWindow : Window
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center,
             Focusable = false,
-            IsTabStop = false,
-            Content = BuildSlotIconVisual(slot, metrics)
+            IsTabStop = false
         };
+        BindSlotIconAsync(iconHost, slot, metrics);
         Grid.SetRow(iconHost, 0);
         grid.Children.Add(iconHost);
 
@@ -841,7 +1019,7 @@ public partial class DockWindow : Window
                  prev.IsRunning != next.IsRunning ||
                  !string.Equals(prev.TargetPath, next.TargetPath, StringComparison.OrdinalIgnoreCase)))
             {
-                iconHost.Content = BuildSlotIconVisual(next, metrics);
+                BindSlotIconAsync(iconHost, next, metrics);
             }
 
             if (grid.Children[1] is Border indicator)
@@ -849,30 +1027,80 @@ public partial class DockWindow : Window
         }
     }
 
-    private UIElement BuildSlotIconVisual(DockSlotItem slot, DockLayoutMetrics metrics)
+    private void BindSlotIconAsync(ContentControl iconHost, DockSlotItem slot, DockLayoutMetrics metrics)
     {
         var requestPx = GetHighDpiDockIconRequestPixels(metrics.IconSize);
-        var bmp = slot.IsRunning
-            ? _shellService.GetIconForWindow(slot.PrimaryWindowHandle, slot.TargetPath, requestPx)
-            : _shellService.GetIconForPath(slot.TargetPath, requestPx);
+        var requestTag = $"{slot.Id}|{slot.PrimaryWindowHandle}|{slot.TargetPath}|{requestPx}";
+        iconHost.Tag = requestTag;
 
-        if (bmp is not null)
+        // Fast O(1) LRU cache hit on UI thread (zero blocking, zero flicker)
+        var cacheHit = slot.IsRunning
+            ? _shellService.TryGetCachedIconForWindow(slot.PrimaryWindowHandle, slot.TargetPath, requestPx, out var cachedBmp)
+            : _shellService.TryGetCachedIconForPath(slot.TargetPath, requestPx, out cachedBmp);
+
+        if (cacheHit && cachedBmp is not null)
         {
-            var img = new Image
-            {
-                Source = bmp,
-                Width = metrics.IconVisualSize,
-                Height = metrics.IconVisualSize,
-                Stretch = Stretch.Uniform,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center,
-                UseLayoutRounding = true,
-                SnapsToDevicePixels = true
-            };
-            RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
-            return img;
+            iconHost.Content = CreateSlotIconImage(cachedBmp, metrics);
+            return;
         }
 
+        // Show lightweight glyph placeholder immediately while extracting icon asynchronously on background STA worker
+        if (iconHost.Content is not Image)
+            iconHost.Content = CreateSlotIconPlaceholder(slot, metrics);
+
+        var ct = _iconLoadCts.Token;
+        var slotIsRunning = slot.IsRunning;
+        var hwnd = slot.PrimaryWindowHandle;
+        var targetPath = slot.TargetPath;
+
+        _ = Task.Run(async () =>
+        {
+            BitmapSource? loaded = null;
+            try
+            {
+                loaded = slotIsRunning
+                    ? await _shellService.GetIconForWindowAsync(hwnd, targetPath, requestPx, ct).ConfigureAwait(false)
+                    : await _shellService.GetIconForPathAsync(targetPath, requestPx, ct).ConfigureAwait(false);
+            }
+            catch
+            {
+                // Ignore cancelled or unreadable shell items
+            }
+
+            if (loaded is null || ct.IsCancellationRequested || _isClosed)
+                return;
+
+            _ = Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+            {
+                if (_isClosed || ct.IsCancellationRequested)
+                    return;
+                if (!Equals(iconHost.Tag, requestTag))
+                    return;
+
+                iconHost.Content = CreateSlotIconImage(loaded, _layoutMetrics);
+            });
+        }, ct);
+    }
+
+    private static Image CreateSlotIconImage(BitmapSource bmp, DockLayoutMetrics metrics)
+    {
+        var img = new Image
+        {
+            Source = bmp,
+            Width = metrics.IconVisualSize,
+            Height = metrics.IconVisualSize,
+            Stretch = Stretch.Uniform,
+            HorizontalAlignment = HorizontalAlignment.Center,
+            VerticalAlignment = VerticalAlignment.Center,
+            UseLayoutRounding = true,
+            SnapsToDevicePixels = true
+        };
+        RenderOptions.SetBitmapScalingMode(img, BitmapScalingMode.HighQuality);
+        return img;
+    }
+
+    private TextBlock CreateSlotIconPlaceholder(DockSlotItem slot, DockLayoutMetrics metrics)
+    {
         return new TextBlock
         {
             Text = slot.Kind == BoxItemKind.Folder ? "\uE8B7" : "\uE756",

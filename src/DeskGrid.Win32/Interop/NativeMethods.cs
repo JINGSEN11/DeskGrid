@@ -71,6 +71,7 @@ internal static class NativeMethods
     public const uint MONITOR_DEFAULTTONULL = 0;
     public const uint MONITOR_DEFAULTTOPRIMARY = 1;
     public const uint MONITOR_DEFAULTTONEAREST = 2;
+    public const uint MONITORINFOF_PRIMARY = 0x00000001;
     public const int MDT_EFFECTIVE_DPI = 0;
 
     public const uint EVENT_SYSTEM_FOREGROUND = 0x0003;
@@ -122,6 +123,7 @@ internal static class NativeMethods
     public const int SM_CYSMICON = 50;
 
     public delegate bool EnumWindowsProc(nint hWnd, nint lParam);
+    public delegate bool MonitorEnumProc(nint hMonitor, nint hdcMonitor, ref RECT lprcMonitor, nint dwData);
     public delegate nint LowLevelMouseProc(int nCode, nint wParam, nint lParam);
     public delegate void WinEventDelegate(
         nint hWinEventHook,
@@ -179,6 +181,17 @@ internal static class NativeMethods
         public RECT rcMonitor;
         public RECT rcWork;
         public uint dwFlags;
+    }
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    public struct MONITORINFOEX
+    {
+        public int cbSize;
+        public RECT rcMonitor;
+        public RECT rcWork;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+        public string szDevice;
     }
 
     [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
@@ -389,6 +402,16 @@ internal static class NativeMethods
         uint uTimeout,
         out nuint lpdwResult);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendMessageTimeoutW", SetLastError = true)]
+    public static extern nint SendMessageTimeout(
+        nint hWnd,
+        uint Msg,
+        nint wParam,
+        nint lParam,
+        uint fuFlags,
+        uint uTimeout,
+        out nuint lpdwResult);
+
     [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "SendNotifyMessageW", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool SendNotifyMessage(
@@ -420,6 +443,14 @@ internal static class NativeMethods
     [DllImport("user32.dll", CharSet = CharSet.Unicode)]
     [return: MarshalAs(UnmanagedType.Bool)]
     public static extern bool GetMonitorInfo(nint hMonitor, ref MONITORINFO lpmi);
+
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMonitorInfoW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool GetMonitorInfoEx(nint hMonitor, ref MONITORINFOEX lpmi);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    public static extern bool EnumDisplayMonitors(nint hdc, nint lprcClip, MonitorEnumProc lpfnEnum, nint dwData);
 
     [DllImport("shcore.dll")]
     public static extern int GetDpiForMonitor(nint hmonitor, int dpiType, out uint dpiX, out uint dpiY);

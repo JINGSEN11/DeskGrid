@@ -6,6 +6,8 @@ public interface IWindowTracker : IDisposable
 {
     event EventHandler? WindowsChanged;
     IReadOnlyList<RunningWindowInfo> GetRunningWindows();
+    void RegisterExcludedWindow(nint hwnd);
+    void UnregisterExcludedWindow(nint hwnd);
     void Start();
     void Stop();
     void ActivateWindow(nint hwnd);

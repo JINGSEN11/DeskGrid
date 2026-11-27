@@ -14,6 +14,7 @@ public sealed class FullscreenMonitorService : IFullscreenMonitor
     private Timer? _timer;
     private HashSet<nint> _fullscreenMonitors = [];
     private bool _isFullscreen;
+    private int _isPolling;
     private bool _disposed;
 
     public event EventHandler<bool>? FullscreenStateChanged;
@@ -51,7 +52,8 @@ public sealed class FullscreenMonitorService : IFullscreenMonitor
     public void Start()
     {
         if (_timer is not null) return;
-        _timer = new Timer(_ => PollFullscreenState(), null, 500, 650);
+        // Run fullscreen detection strictly on background thread-pool timer every 500ms
+        _timer = new Timer(_ => PollFullscreenState(), null, 500, 500);
     }
 
     public void Stop()
@@ -62,26 +64,34 @@ public sealed class FullscreenMonitorService : IFullscreenMonitor
 
     private void PollFullscreenState()
     {
-        if (_disposed) return;
+        if (_disposed || Interlocked.Exchange(ref _isPolling, 1) != 0)
+            return;
 
-        var detectedMonitors = DetectFullscreenMonitors();
-        var detectedAny = detectedMonitors.Count > 0;
-        bool anyChanged;
-        bool setChanged;
-
-        lock (_stateLock)
+        try
         {
-            anyChanged = detectedAny != _isFullscreen;
-            setChanged = !_fullscreenMonitors.SetEquals(detectedMonitors);
-            if (setChanged)
-                _fullscreenMonitors = detectedMonitors;
-            _isFullscreen = detectedAny;
-        }
+            var detectedMonitors = DetectFullscreenMonitors();
+            var detectedAny = detectedMonitors.Count > 0;
+            bool anyChanged;
+            bool setChanged;
 
-        if (setChanged)
-            FullscreenMonitorsChanged?.Invoke(this, new HashSet<nint>(detectedMonitors));
-        if (anyChanged)
-            FullscreenStateChanged?.Invoke(this, detectedAny);
+            lock (_stateLock)
+            {
+                anyChanged = detectedAny != _isFullscreen;
+                setChanged = !_fullscreenMonitors.SetEquals(detectedMonitors);
+                if (setChanged)
+                    _fullscreenMonitors = detectedMonitors;
+                _isFullscreen = detectedAny;
+            }
+
+            if (setChanged && !_disposed)
+                FullscreenMonitorsChanged?.Invoke(this, new HashSet<nint>(detectedMonitors));
+            if (anyChanged && !_disposed)
+                FullscreenStateChanged?.Invoke(this, detectedAny);
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _isPolling, 0);
+        }
     }
 
     private HashSet<nint> DetectFullscreenMonitors()
@@ -102,6 +112,7 @@ public sealed class FullscreenMonitorService : IFullscreenMonitor
 
         // 2. Per-monitor Z-order inspection: check the topmost normal window covering each monitor
         var decidedMonitors = new HashSet<nint>(fullscreenMonitors);
+        var monitorInfoCache = new Dictionary<nint, NativeMethods.MONITORINFO>();
 
         NativeMethods.EnumWindows((hwnd, _) =>
         {
@@ -109,7 +120,7 @@ public sealed class FullscreenMonitorService : IFullscreenMonitor
                 return true;
 
             NativeMethods.GetWindowThreadProcessId(hwnd, out var pid);
-            if (pid == _ownProcessId)
+            if (pid == 0 || pid == _ownProcessId)
                 return true;
 
             if (IsWindowCloaked(hwnd))
@@ -133,9 +144,13 @@ public sealed class FullscreenMonitorService : IFullscreenMonitor
             if (monitor == 0 || decidedMonitors.Contains(monitor))
                 return true;
 
-            var mi = new NativeMethods.MONITORINFO { cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>() };
-            if (!NativeMethods.GetMonitorInfo(monitor, ref mi))
-                return true;
+            if (!monitorInfoCache.TryGetValue(monitor, out var mi))
+            {
+                mi = new NativeMethods.MONITORINFO { cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>() };
+                if (!NativeMethods.GetMonitorInfo(monitor, ref mi))
+                    return true;
+                monitorInfoCache[monitor] = mi;
+            }
 
             if (IsWindowFullscreenOnMonitor(hwnd, rect, mi))
             {

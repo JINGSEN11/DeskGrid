@@ -3,6 +3,7 @@ using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
+using System.Windows.Threading;
 using DeskGrid.Core.Services;
 using DeskGrid.Win32.Services;
 
@@ -10,18 +11,25 @@ namespace DeskGrid.App.Controls;
 
 /// <summary>
 /// Horizontal Dock icon strip with smooth 60fps raised-cosine wave magnification.
-/// Strictly tracks real-time cursor position and immediately smoothly resets back to 1.0
-/// whenever the pointer leaves the panel, another window intercepts it, or the item list changes.
-/// Only subscribes to CompositionTarget.Rendering while animating, keeping idle CPU at 0%.
+/// Uses ONLY GPU-composited RenderTransform (ScaleTransform + TranslateTransform) —
+/// NEVER mutates Width, Height, or Margin during animation frames.
+/// Subscribes to CompositionTarget.Rendering strictly while actively animating and
+/// unsubscribes immediately once settled (keeping idle CPU at 0% across all monitors).
 /// </summary>
 public sealed class DockMagnifyingPanel : StackPanel
 {
     private const double DragPartShiftPixels = 6.0;
+    private const double ScaleSettleEpsilon = 0.002;
+    private const double OffsetSettleEpsilon = 0.08;
+    private const double TransformWriteEpsilon = 0.0002;
+
+    private readonly DispatcherTimer _hoverWatchdogTimer;
 
     private double[] _currentScales = [];
     private double[] _targetScales = [];
     private double[] _currentOffsetX = [];
     private double[] _targetOffsetX = [];
+    private double[] _centersBuffer = [];
     private double? _mouseX;
     private bool _isHoverActive;
     private bool _isAnimating;
@@ -41,15 +49,34 @@ public sealed class DockMagnifyingPanel : StackPanel
         UseLayoutRounding = true;
         SnapsToDevicePixels = true;
 
+        // Lightweight watchdog ONLY runs while mouse is stationary over this panel with settled magnification,
+        // catching the rare case where another window covers the Dock without firing WPF MouseLeave.
+        _hoverWatchdogTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromMilliseconds(160)
+        };
+        _hoverWatchdogTimer.Tick += OnHoverWatchdogTick;
+
         MouseMove += OnPanelMouseMove;
         MouseLeave += OnPanelMouseLeave;
         LostMouseCapture += (_, _) => SmoothResetScales();
         IsVisibleChanged += (_, _) =>
         {
             if (!IsVisible)
-                ResetScales();
+                StopAndCleanup();
         };
-        Unloaded += (_, _) => StopAnimation();
+        Unloaded += (_, _) => StopAndCleanup();
+    }
+
+    /// <summary>
+    /// Immediately detaches all rendering hooks and timers and resets transforms to rest.
+    /// Must be called when a DockWindow hides or closes to guarantee 0% idle CPU and zero leaks.
+    /// </summary>
+    public void StopAndCleanup()
+    {
+        StopHoverWatchdog();
+        StopAnimation();
+        ResetScales();
     }
 
     /// <summary>
@@ -61,6 +88,8 @@ public sealed class DockMagnifyingPanel : StackPanel
         _isDragReordering = false;
         _dragInsertionSlot = null;
         _mouseX = null;
+        StopHoverWatchdog();
+
         var count = Children.Count;
         _currentScales = new double[count];
         _targetScales = new double[count];
@@ -79,6 +108,7 @@ public sealed class DockMagnifyingPanel : StackPanel
     {
         _isHoverActive = false;
         _mouseX = null;
+        StopHoverWatchdog();
         SyncCurrentScalesFromVisuals();
         Array.Fill(_targetScales, 1.0);
         if (!_isDragReordering)
@@ -102,6 +132,7 @@ public sealed class DockMagnifyingPanel : StackPanel
         _dragInsertionSlot = null;
         _isHoverActive = false;
         _mouseX = null;
+        StopHoverWatchdog();
         SyncCurrentScalesFromVisuals();
         Array.Fill(_targetScales, 1.0);
         Array.Fill(_targetOffsetX, 0.0);
@@ -141,6 +172,7 @@ public sealed class DockMagnifyingPanel : StackPanel
     {
         _isDragReordering = false;
         _dragInsertionSlot = null;
+        StopHoverWatchdog();
         SyncCurrentScalesFromVisuals();
         Array.Fill(_targetScales, 1.0);
         Array.Fill(_targetOffsetX, 0.0);
@@ -183,6 +215,7 @@ public sealed class DockMagnifyingPanel : StackPanel
         // and smoothly settle every icon back to 1.0 scale so no magnified ghost sticks around.
         _isHoverActive = false;
         _mouseX = null;
+        StopHoverWatchdog();
         SyncCurrentScalesFromVisuals();
         Array.Fill(_targetScales, 1.0);
         if (_isDragReordering)
@@ -207,10 +240,17 @@ public sealed class DockMagnifyingPanel : StackPanel
             return;
         }
 
+        var nextX = e.GetPosition(this).X;
+        if (_isHoverActive && _mouseX.HasValue && Math.Abs(_mouseX.Value - nextX) < 0.25 && !_isAnimating)
+            return;
+
         _isHoverActive = true;
-        _mouseX = e.GetPosition(this).X;
+        _mouseX = nextX;
         RecomputeTargets();
-        StartAnimation();
+        if (AnyTransformNotSettled())
+            StartAnimation();
+        else
+            StartHoverWatchdogIfNeeded();
     }
 
     private void OnPanelMouseLeave(object sender, MouseEventArgs e)
@@ -219,6 +259,49 @@ public sealed class DockMagnifyingPanel : StackPanel
             return;
 
         SmoothResetScales();
+    }
+
+    private void OnHoverWatchdogTick(object? sender, EventArgs e)
+    {
+        if (!_isHoverActive || _isAnimating || _isDragReordering || !IsVisible)
+        {
+            StopHoverWatchdog();
+            return;
+        }
+
+        var liveX = SampleRealTimeMouseX();
+        if (liveX is null)
+        {
+            SmoothResetScales();
+            return;
+        }
+
+        if (!_mouseX.HasValue || Math.Abs(liveX.Value - _mouseX.Value) >= 0.5)
+        {
+            _mouseX = liveX;
+            RecomputeTargets();
+            if (AnyTransformNotSettled())
+                StartAnimation();
+        }
+    }
+
+    private void StartHoverWatchdogIfNeeded()
+    {
+        if (_isHoverActive && !_isAnimating && !_isDragReordering && IsVisible && EnableMagnification)
+        {
+            if (!_hoverWatchdogTimer.IsEnabled)
+                _hoverWatchdogTimer.Start();
+        }
+        else
+        {
+            StopHoverWatchdog();
+        }
+    }
+
+    private void StopHoverWatchdog()
+    {
+        if (_hoverWatchdogTimer.IsEnabled)
+            _hoverWatchdogTimer.Stop();
     }
 
     private void SyncCurrentScalesFromVisuals()
@@ -238,16 +321,14 @@ public sealed class DockMagnifyingPanel : StackPanel
                 group.Children.Count >= 1)
             {
                 if (group.Children[0] is ScaleTransform st &&
-                    !double.IsNaN(st.ScaleX) &&
-                    !double.IsInfinity(st.ScaleX))
+                    double.IsFinite(st.ScaleX))
                 {
                     scale = Math.Clamp(st.ScaleX, 1.0, 2.0);
                 }
 
                 if (group.Children.Count >= 2 &&
                     group.Children[1] is TranslateTransform tt &&
-                    !double.IsNaN(tt.X) &&
-                    !double.IsInfinity(tt.X))
+                    double.IsFinite(tt.X))
                 {
                     offsetX = Math.Clamp(tt.X, -40.0, 40.0);
                 }
@@ -339,21 +420,27 @@ public sealed class DockMagnifyingPanel : StackPanel
             return;
         }
 
-        var centers = new double[count];
+        if (_centersBuffer.Length != count)
+            _centersBuffer = new double[count];
+
         for (var i = 0; i < count; i++)
         {
             if (Children[i] is FrameworkElement fe && fe.ActualWidth > 0)
             {
                 // Use pure layout offset (unaffected by RenderTransform) so centers never drift during animation
                 var offset = VisualTreeHelper.GetOffset(fe);
-                centers[i] = offset.X + fe.ActualWidth * 0.5;
+                _centersBuffer[i] = offset.X + fe.ActualWidth * 0.5;
+            }
+            else
+            {
+                _centersBuffer[i] = 0.0;
             }
         }
 
         var effectiveRadius = EffectRadius * DockLayoutMetrics.ClampScale(DockScale);
         _targetScales = DockMagnificationCalculator.ComputeScales(
             _mouseX,
-            centers,
+            _centersBuffer,
             EnableMagnification,
             MaxScale,
             effectiveRadius);
@@ -363,12 +450,12 @@ public sealed class DockMagnifyingPanel : StackPanel
     {
         for (var i = 0; i < _currentScales.Length && i < _targetScales.Length; i++)
         {
-            if (Math.Abs(_targetScales[i] - _currentScales[i]) > 0.002)
+            if (Math.Abs(_targetScales[i] - _currentScales[i]) > ScaleSettleEpsilon)
                 return true;
         }
         for (var i = 0; i < _currentOffsetX.Length && i < _targetOffsetX.Length; i++)
         {
-            if (Math.Abs(_targetOffsetX[i] - _currentOffsetX[i]) > 0.08)
+            if (Math.Abs(_targetOffsetX[i] - _currentOffsetX[i]) > OffsetSettleEpsilon)
                 return true;
         }
         return false;
@@ -376,6 +463,7 @@ public sealed class DockMagnifyingPanel : StackPanel
 
     private void StartAnimation()
     {
+        StopHoverWatchdog();
         if (_isAnimating) return;
         _isAnimating = true;
         CompositionTarget.Rendering += OnRenderFrame;
@@ -390,9 +478,15 @@ public sealed class DockMagnifyingPanel : StackPanel
 
     private void OnRenderFrame(object? sender, EventArgs e)
     {
+        if (!IsVisible)
+        {
+            StopAndCleanup();
+            return;
+        }
+
         EnsureArrays();
 
-        // Strictly re-verify real-time mouse position every frame so missed MouseLeave events never cause sticky magnification
+        // Re-verify real-time pointer while animating hover magnification so missed MouseLeave never sticks
         if (!_isDragReordering && _isHoverActive)
         {
             var liveX = SampleRealTimeMouseX();
@@ -402,7 +496,7 @@ public sealed class DockMagnifyingPanel : StackPanel
                 _mouseX = null;
                 Array.Fill(_targetScales, 1.0);
             }
-            else
+            else if (!_mouseX.HasValue || Math.Abs(liveX.Value - _mouseX.Value) >= 0.25)
             {
                 _mouseX = liveX;
                 RecomputeTargets();
@@ -421,7 +515,7 @@ public sealed class DockMagnifyingPanel : StackPanel
         for (var i = 0; i < _currentScales.Length; i++)
         {
             var diff = _targetScales[i] - _currentScales[i];
-            if (Math.Abs(diff) > 0.002)
+            if (Math.Abs(diff) > ScaleSettleEpsilon)
             {
                 _currentScales[i] += diff * lerpFactor;
                 settled = false;
@@ -435,7 +529,7 @@ public sealed class DockMagnifyingPanel : StackPanel
         for (var i = 0; i < _currentOffsetX.Length && i < _targetOffsetX.Length; i++)
         {
             var diffX = _targetOffsetX[i] - _currentOffsetX[i];
-            if (Math.Abs(diffX) > 0.08)
+            if (Math.Abs(diffX) > OffsetSettleEpsilon)
             {
                 _currentOffsetX[i] += diffX * 0.28;
                 settled = false;
@@ -448,12 +542,17 @@ public sealed class DockMagnifyingPanel : StackPanel
 
         ApplyTransforms();
 
-        if (settled && !_isHoverActive)
+        // Always detach CompositionTarget.Rendering once animation settles (0% CPU when idle or cursor stationary)
+        if (settled)
+        {
             StopAnimation();
+            StartHoverWatchdogIfNeeded();
+        }
     }
 
     private void ApplyTransforms()
     {
+        var liftPx = 14.0 * DockLayoutMetrics.ClampScale(DockScale);
         for (var i = 0; i < Children.Count && i < _currentScales.Length; i++)
         {
             if (Children[i] is not FrameworkElement fe)
@@ -461,10 +560,10 @@ public sealed class DockMagnifyingPanel : StackPanel
 
             var s = _currentScales[i];
             var offsetX = i < _currentOffsetX.Length ? _currentOffsetX[i] : 0.0;
-            fe.RenderTransformOrigin = new Point(0.5, 1.0);
 
             if (fe.RenderTransform is not TransformGroup group || group.Children.Count != 2)
             {
+                fe.RenderTransformOrigin = new Point(0.5, 1.0);
                 group = new TransformGroup();
                 group.Children.Add(new ScaleTransform(1, 1));
                 group.Children.Add(new TranslateTransform(0, 0));
@@ -473,12 +572,21 @@ public sealed class DockMagnifyingPanel : StackPanel
 
             var scaleTx = (ScaleTransform)group.Children[0];
             var transTx = (TranslateTransform)group.Children[1];
-            var liftPx = 14.0 * DockLayoutMetrics.ClampScale(DockScale);
-            scaleTx.ScaleX = s;
-            scaleTx.ScaleY = s;
-            transTx.X = Math.Abs(offsetX) <= 0.05 ? 0.0 : offsetX;
-            transTx.Y = Math.Abs(s - 1.0) <= 0.001 ? 0.0 : -(s - 1.0) * liftPx;
-            Panel.SetZIndex(fe, Math.Abs(s - 1.0) <= 0.001 ? 0 : (int)Math.Round(s * 100));
+            var targetX = Math.Abs(offsetX) <= 0.05 ? 0.0 : offsetX;
+            var targetY = Math.Abs(s - 1.0) <= 0.001 ? 0.0 : -(s - 1.0) * liftPx;
+            var targetZ = Math.Abs(s - 1.0) <= 0.001 ? 0 : (int)Math.Round(s * 100);
+
+            if (Math.Abs(scaleTx.ScaleX - s) > TransformWriteEpsilon)
+                scaleTx.ScaleX = s;
+            if (Math.Abs(scaleTx.ScaleY - s) > TransformWriteEpsilon)
+                scaleTx.ScaleY = s;
+            if (Math.Abs(transTx.X - targetX) > 0.02)
+                transTx.X = targetX;
+            if (Math.Abs(transTx.Y - targetY) > 0.02)
+                transTx.Y = targetY;
+
+            if (Panel.GetZIndex(fe) != targetZ)
+                Panel.SetZIndex(fe, targetZ);
         }
     }
 }

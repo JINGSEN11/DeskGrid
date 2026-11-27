@@ -30,11 +30,109 @@ public readonly record struct DockWindowPlacement(
     double DipLeft,
     double DipTop);
 
+/// <summary>
+/// Re-entrancy guard and minimum-delta position filter preventing cross-monitor DPI / layout
+/// ping-pong loops when positioning primary or secondary DockWindow instances.
+/// </summary>
+public sealed class DockPositionGuard
+{
+    public const double DefaultDipThreshold = 0.5;
+    public const int DefaultPhysicalThresholdPx = 1;
+
+    private bool _isUpdatingPosition;
+
+    public bool IsUpdatingPosition => _isUpdatingPosition;
+
+    public bool TryExecute(Action updateAction)
+    {
+        ArgumentNullException.ThrowIfNull(updateAction);
+        if (_isUpdatingPosition)
+            return false;
+
+        _isUpdatingPosition = true;
+        try
+        {
+            updateAction();
+            return true;
+        }
+        finally
+        {
+            _isUpdatingPosition = false;
+        }
+    }
+
+    public static bool ShouldUpdateDipPosition(
+        double currentLeft,
+        double currentTop,
+        double targetLeft,
+        double targetTop,
+        double threshold = DefaultDipThreshold)
+    {
+        if (!double.IsFinite(targetLeft) || !double.IsFinite(targetTop))
+            return false;
+
+        if (!double.IsFinite(currentLeft) || !double.IsFinite(currentTop))
+            return true;
+
+        return Math.Abs(currentLeft - targetLeft) >= threshold ||
+               Math.Abs(currentTop - targetTop) >= threshold;
+    }
+
+    public static bool ShouldUpdatePhysicalPosition(
+        PhysicalRect? currentRect,
+        int targetLeft,
+        int targetTop,
+        int thresholdPx = DefaultPhysicalThresholdPx)
+    {
+        if (!currentRect.HasValue)
+            return true;
+
+        var safeThreshold = Math.Max(0, thresholdPx);
+        return Math.Abs(currentRect.Value.Left - targetLeft) > safeThreshold ||
+               Math.Abs(currentRect.Value.Top - targetTop) > safeThreshold;
+    }
+}
+
+/// <summary>
+/// Pure filter deciding whether a window handle must be excluded from Dock running-window tracking.
+/// Guarantees all own-process windows (primary Dock, secondary Docks, boxes, popups) are 100% filtered.
+/// </summary>
+public static class WindowExclusionFilter
+{
+    public static bool ShouldExcludeWindow(
+        nint hwnd,
+        uint windowProcessId,
+        uint ownProcessId,
+        IReadOnlySet<nint>? excludedHandles = null,
+        uint rootAncestorProcessId = 0,
+        uint ownerProcessId = 0)
+    {
+        if (hwnd == 0)
+            return true;
+
+        if (windowProcessId == 0 || windowProcessId == ownProcessId)
+            return true;
+
+        if (rootAncestorProcessId != 0 && rootAncestorProcessId == ownProcessId)
+            return true;
+
+        if (ownerProcessId != 0 && ownerProcessId == ownProcessId)
+            return true;
+
+        if (excludedHandles is not null && excludedHandles.Contains(hwnd))
+            return true;
+
+        return false;
+    }
+}
+
 public static class DockPositionCalculator
 {
     /// <summary>
     /// Computes both exact physical pixel placement (for PerMonitorV2 SetWindowPos)
-    /// and DPI-converted DIP placement anchored to the bottom of a target monitor.
+    /// and DPI-converted DIP placement anchored strictly to the target monitor's own bounds/working area.
+    /// Never references SystemParameters.WorkArea so secondary monitors (including negative coordinates
+    /// and mixed-DPI displays) can never be pulled back toward the primary monitor.
     /// </summary>
     public static DockWindowPlacement CalculateBottomPlacement(
         DisplayMonitorInfo monitor,
@@ -60,7 +158,8 @@ public static class DockPositionCalculator
         var physLeft = Math.Clamp(rawLeft, anchorRect.Left, maxLeft);
 
         var bottomEdge = autoHideSystemTaskbar ? monitor.BoundsPx.Bottom : anchorRect.Bottom;
-        var physTop = bottomEdge - physH;
+        var rawTop = bottomEdge - physH;
+        var physTop = Math.Max(anchorRect.Top, rawTop);
 
         return new DockWindowPlacement(
             PhysicalLeft: physLeft,

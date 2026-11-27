@@ -17,9 +17,73 @@ public sealed class ShellIconService : IFileOperationsService
     private const int MaxCacheEntries = 512;
     private const int MinHighResIconPx = 96;
     private const int MaxHighResIconPx = 256;
+    private const uint WindowIconTimeoutMs = 150;
     private static readonly Guid ShellItemImageFactoryGuid = new("bcc18b79-ba16-442f-80c4-8a59c30c463b");
 
-    private readonly ConcurrentDictionary<string, BitmapSource> _cache = new(StringComparer.OrdinalIgnoreCase);
+    private sealed record LruEntry(string Key, BitmapSource Value);
+
+    private readonly object _lruLock = new();
+    private readonly Dictionary<string, LinkedListNode<LruEntry>> _lruMap = new(StringComparer.OrdinalIgnoreCase);
+    private readonly LinkedList<LruEntry> _lruList = new();
+    private readonly ConcurrentDictionary<string, Task<BitmapSource?>> _inFlightLoads = new(StringComparer.OrdinalIgnoreCase);
+
+    // Dedicated background STA worker queue so IShellItemImageFactory / SHGetFileInfo COM calls
+    // NEVER execute on or block the WPF UI thread.
+    private readonly BlockingCollection<Action> _staQueue = new();
+    private readonly Thread _staWorker;
+
+    public ShellIconService()
+    {
+        _staWorker = new Thread(RunStaWorkerLoop)
+        {
+            Name = "DeskGrid.ShellIconStaWorker",
+            IsBackground = true
+        };
+        if (OperatingSystem.IsWindows())
+            _staWorker.SetApartmentState(ApartmentState.STA);
+        _staWorker.Start();
+    }
+
+    private void RunStaWorkerLoop()
+    {
+        foreach (var work in _staQueue.GetConsumingEnumerable())
+        {
+            try
+            {
+                work();
+            }
+            catch
+            {
+                // Isolate individual shell extraction exceptions
+            }
+        }
+    }
+
+    private Task<T> RunOnStaWorkerAsync<T>(Func<T> func, CancellationToken cancellationToken)
+    {
+        if (cancellationToken.IsCancellationRequested)
+            return Task.FromCanceled<T>(cancellationToken);
+
+        var tcs = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _staQueue.Add(() =>
+        {
+            if (cancellationToken.IsCancellationRequested)
+            {
+                tcs.TrySetCanceled(cancellationToken);
+                return;
+            }
+
+            try
+            {
+                tcs.TrySetResult(func());
+            }
+            catch (Exception ex)
+            {
+                tcs.TrySetException(ex);
+            }
+        });
+        return tcs.Task;
+    }
 
     /// <summary>
     /// Computes a crisp high-resolution physical pixel size for shell icon extraction,
@@ -36,29 +100,201 @@ public sealed class ShellIconService : IFileOperationsService
         return MaxHighResIconPx;
     }
 
+    private bool TryGetFromLru(string cacheKey, out BitmapSource? icon)
+    {
+        lock (_lruLock)
+        {
+            if (_lruMap.TryGetValue(cacheKey, out var node))
+            {
+                _lruList.Remove(node);
+                _lruList.AddFirst(node);
+                icon = node.Value.Value;
+                return true;
+            }
+        }
+
+        icon = null;
+        return false;
+    }
+
+    private void PutInLru(string cacheKey, BitmapSource icon)
+    {
+        if (icon.CanFreeze && !icon.IsFrozen)
+            icon.Freeze();
+
+        lock (_lruLock)
+        {
+            if (_lruMap.TryGetValue(cacheKey, out var existing))
+            {
+                existing.Value = new LruEntry(cacheKey, icon);
+                _lruList.Remove(existing);
+                _lruList.AddFirst(existing);
+                return;
+            }
+
+            var node = new LinkedListNode<LruEntry>(new LruEntry(cacheKey, icon));
+            _lruList.AddFirst(node);
+            _lruMap[cacheKey] = node;
+
+            while (_lruMap.Count > MaxCacheEntries && _lruList.Last is { } oldest)
+            {
+                _lruList.RemoveLast();
+                _lruMap.Remove(oldest.Value.Key);
+            }
+        }
+    }
+
+    private static string BuildPathCacheKey(string path, int requestPx) => $"path:{path}|{requestPx}";
+    private static string BuildWindowCacheKey(nint hwnd, int requestPx) => $"hwnd:{hwnd}|{requestPx}";
+
+    /// <summary>
+    /// Fast non-blocking O(1) LRU cache check for UI threads.
+    /// </summary>
+    public bool TryGetCachedIconForPath(string path, int pixelSize, out BitmapSource? icon)
+    {
+        icon = null;
+        if (string.IsNullOrWhiteSpace(path))
+            return false;
+
+        var requestPx = Math.Clamp(pixelSize, MinHighResIconPx, MaxHighResIconPx);
+        return TryGetFromLru(BuildPathCacheKey(path, requestPx), out icon);
+    }
+
+    /// <summary>
+    /// Fast non-blocking O(1) LRU cache check for running window icons on UI threads.
+    /// </summary>
+    public bool TryGetCachedIconForWindow(nint hwnd, string? fallbackExePath, int pixelSize, out BitmapSource? icon)
+    {
+        icon = null;
+        var requestPx = Math.Clamp(pixelSize, MinHighResIconPx, MaxHighResIconPx);
+        if (!string.IsNullOrWhiteSpace(fallbackExePath) &&
+            TryGetFromLru(BuildPathCacheKey(fallbackExePath, requestPx), out icon))
+        {
+            return true;
+        }
+
+        if (hwnd != 0 && TryGetFromLru(BuildWindowCacheKey(hwnd, requestPx), out icon))
+            return true;
+
+        return false;
+    }
+
+    /// <summary>
+    /// Asynchronously loads a shell icon on the dedicated background STA worker thread
+    /// with LRU caching and in-flight deduplication (never blocks UI thread).
+    /// </summary>
+    public Task<BitmapSource?> GetIconForPathAsync(string path, int pixelSize = 128, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return Task.FromResult<BitmapSource?>(null);
+
+        var requestPx = Math.Clamp(pixelSize, MinHighResIconPx, MaxHighResIconPx);
+        var cacheKey = BuildPathCacheKey(path, requestPx);
+        if (TryGetFromLru(cacheKey, out var cached))
+            return Task.FromResult<BitmapSource?>(cached);
+
+        var loadTask = _inFlightLoads.GetOrAdd(cacheKey, _ => LoadPathIconCoreAsync(cacheKey, path, requestPx));
+        return cancellationToken.CanBeCanceled
+            ? loadTask.WaitAsync(cancellationToken)
+            : loadTask;
+    }
+
+    /// <summary>
+    /// Asynchronously loads a running window icon on the dedicated background STA worker thread
+    /// with non-blocking SendMessageTimeout(SMTO_ABORTIFHUNG) and LRU caching.
+    /// </summary>
+    public Task<BitmapSource?> GetIconForWindowAsync(
+        nint hwnd,
+        string? fallbackExePath = null,
+        int pixelSize = 128,
+        CancellationToken cancellationToken = default)
+    {
+        var requestPx = Math.Clamp(pixelSize, MinHighResIconPx, MaxHighResIconPx);
+        if (TryGetCachedIconForWindow(hwnd, fallbackExePath, requestPx, out var cached))
+            return Task.FromResult<BitmapSource?>(cached);
+
+        var dedupeKey = !string.IsNullOrWhiteSpace(fallbackExePath)
+            ? $"win:{fallbackExePath}|{hwnd}|{requestPx}"
+            : BuildWindowCacheKey(hwnd, requestPx);
+
+        var loadTask = _inFlightLoads.GetOrAdd(dedupeKey, _ => LoadWindowIconCoreAsync(dedupeKey, hwnd, fallbackExePath, requestPx));
+        return cancellationToken.CanBeCanceled
+            ? loadTask.WaitAsync(cancellationToken)
+            : loadTask;
+    }
+
+    private async Task<BitmapSource?> LoadPathIconCoreAsync(string cacheKey, string path, int requestPx)
+    {
+        try
+        {
+            var icon = await RunOnStaWorkerAsync(() => ExtractIconForPathCore(path, requestPx), CancellationToken.None)
+                .ConfigureAwait(false);
+            if (icon is not null)
+                PutInLru(cacheKey, icon);
+            return icon;
+        }
+        finally
+        {
+            _inFlightLoads.TryRemove(cacheKey, out _);
+        }
+    }
+
+    private async Task<BitmapSource?> LoadWindowIconCoreAsync(string dedupeKey, nint hwnd, string? fallbackExePath, int requestPx)
+    {
+        try
+        {
+            var icon = await RunOnStaWorkerAsync(
+                () =>
+                {
+                    if (!string.IsNullOrWhiteSpace(fallbackExePath) && File.Exists(fallbackExePath))
+                    {
+                        var pathKey = BuildPathCacheKey(fallbackExePath, requestPx);
+                        if (TryGetFromLru(pathKey, out var cachedExe))
+                            return cachedExe;
+
+                        var fromExe = ExtractIconForPathCore(fallbackExePath, requestPx);
+                        if (fromExe is not null)
+                        {
+                            PutInLru(pathKey, fromExe);
+                            return fromExe;
+                        }
+                    }
+
+                    if (hwnd == 0)
+                        return null;
+
+                    var winKey = BuildWindowCacheKey(hwnd, requestPx);
+                    if (TryGetFromLru(winKey, out var cachedWin))
+                        return cachedWin;
+
+                    var fromWin = ExtractIconFromWindowHandle(hwnd);
+                    if (fromWin is not null)
+                        PutInLru(winKey, fromWin);
+                    return fromWin;
+                },
+                CancellationToken.None).ConfigureAwait(false);
+
+            return icon;
+        }
+        finally
+        {
+            _inFlightLoads.TryRemove(dedupeKey, out _);
+        }
+    }
+
     public BitmapSource? GetIconForPath(string path, int pixelSize = 128)
     {
         if (string.IsNullOrWhiteSpace(path))
             return null;
 
         var requestPx = Math.Clamp(pixelSize, MinHighResIconPx, MaxHighResIconPx);
-        var cacheKey = $"{path}|{requestPx}";
-        if (_cache.TryGetValue(cacheKey, out var cached))
+        var cacheKey = BuildPathCacheKey(path, requestPx);
+        if (TryGetFromLru(cacheKey, out var cached))
             return cached;
 
-        BitmapSource? icon = TryGetShellItemBitmap(path, requestPx)
-            ?? TryGetShGetFileInfoIcon(path);
-
+        var icon = ExtractIconForPathCore(path, requestPx);
         if (icon is not null)
-        {
-            if (icon.CanFreeze && !icon.IsFrozen)
-                icon.Freeze();
-
-            if (_cache.Count >= MaxCacheEntries)
-                _cache.Clear();
-
-            _cache[cacheKey] = icon;
-        }
+            PutInLru(cacheKey, icon);
 
         return icon;
     }
@@ -66,6 +302,9 @@ public sealed class ShellIconService : IFileOperationsService
     public BitmapSource? GetIconForWindow(nint hwnd, string? fallbackExePath = null, int pixelSize = 128)
     {
         var requestPx = Math.Clamp(pixelSize, MinHighResIconPx, MaxHighResIconPx);
+        if (TryGetCachedIconForWindow(hwnd, fallbackExePath, requestPx, out var cached))
+            return cached;
+
         if (!string.IsNullOrWhiteSpace(fallbackExePath) && File.Exists(fallbackExePath))
         {
             var fromExe = GetIconForPath(fallbackExePath, requestPx);
@@ -76,9 +315,31 @@ public sealed class ShellIconService : IFileOperationsService
         if (hwnd == 0)
             return null;
 
-        nint hIcon = NativeMethods.SendMessage(hwnd, NativeMethods.WM_GETICON, NativeMethods.ICON_BIG, 0);
+        var fromWin = ExtractIconFromWindowHandle(hwnd);
+        if (fromWin is not null)
+            PutInLru(BuildWindowCacheKey(hwnd, requestPx), fromWin);
+        return fromWin;
+    }
+
+    private static BitmapSource? ExtractIconForPathCore(string path, int requestPx)
+    {
+        var icon = TryGetShellItemBitmap(path, requestPx)
+            ?? TryGetShGetFileInfoIcon(path);
+
+        if (icon is not null && icon.CanFreeze && !icon.IsFrozen)
+            icon.Freeze();
+
+        return icon;
+    }
+
+    private static BitmapSource? ExtractIconFromWindowHandle(nint hwnd)
+    {
+        if (hwnd == 0 || !NativeMethods.IsWindow(hwnd))
+            return null;
+
+        nint hIcon = QueryWindowIconNonBlocking(hwnd, NativeMethods.ICON_BIG);
         if (hIcon == 0)
-            hIcon = NativeMethods.SendMessage(hwnd, NativeMethods.WM_GETICON, NativeMethods.ICON_SMALL2, 0);
+            hIcon = QueryWindowIconNonBlocking(hwnd, NativeMethods.ICON_SMALL2);
         if (hIcon == 0)
             hIcon = NativeMethods.GetClassLongPtr(hwnd, NativeMethods.GCL_HICON);
         if (hIcon == 0)
@@ -97,6 +358,19 @@ public sealed class ShellIconService : IFileOperationsService
         {
             return null;
         }
+    }
+
+    private static nint QueryWindowIconNonBlocking(nint hwnd, nint iconType)
+    {
+        var ok = NativeMethods.SendMessageTimeout(
+            hwnd,
+            NativeMethods.WM_GETICON,
+            iconType,
+            0,
+            NativeMethods.SMTO_ABORTIFHUNG | NativeMethods.SMTO_NORMAL,
+            WindowIconTimeoutMs,
+            out var result);
+        return ok != 0 ? (nint)result : 0;
     }
 
     private static BitmapSource? TryGetShellItemBitmap(string path, int pixelSize)

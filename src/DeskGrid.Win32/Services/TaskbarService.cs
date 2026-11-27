@@ -80,7 +80,11 @@ public sealed class TaskbarService : ITaskbarService
             if (_disposed)
                 return;
 
-            RestoreTaskbarLocked(forceAppBarRestore: _isHiddenByApp || HasAnySentinelLocked());
+            // No-op when DeskGrid has not hidden the taskbar (avoids expensive HWND_BROADCAST on unrelated setting changes)
+            if (!_isHiddenByApp && !HasAnySentinelLocked())
+                return;
+
+            RestoreTaskbarLocked(forceAppBarRestore: true, asyncBroadcast: true);
         }
     }
 
@@ -108,7 +112,7 @@ public sealed class TaskbarService : ITaskbarService
     {
         lock (_lock)
         {
-            RestoreTaskbarLocked(forceAppBarRestore: true);
+            RestoreTaskbarLocked(forceAppBarRestore: true, asyncBroadcast: true);
         }
     }
 
@@ -118,12 +122,12 @@ public sealed class TaskbarService : ITaskbarService
         {
             if (_isHiddenByApp || HasAnySentinelLocked())
             {
-                RestoreTaskbarLocked(forceAppBarRestore: true);
+                RestoreTaskbarLocked(forceAppBarRestore: true, asyncBroadcast: false);
             }
         }
     }
 
-    private void RestoreTaskbarLocked(bool forceAppBarRestore)
+    private void RestoreTaskbarLocked(bool forceAppBarRestore, bool asyncBroadcast)
     {
         StopEnforceTimerLocked();
 
@@ -132,7 +136,11 @@ public sealed class TaskbarService : ITaskbarService
             RestoreAppBarState(restoreState);
 
         ShowAllTaskbars();
-        BroadcastWorkAreaRefresh();
+        if (asyncBroadcast)
+            _ = Task.Run(BroadcastWorkAreaRefresh);
+        else
+            BroadcastWorkAreaRefresh();
+
         TryDeleteAllSentinelsLocked();
         _originalAppBarState = null;
         _isHiddenByApp = false;

@@ -59,11 +59,24 @@ public static class ThemePalette
         _ => ThemeMode.System
     };
 
+    private static ThemePreference? _lastAppliedPreference;
+    private static bool? _lastAppliedDark;
+
     public static void ApplyToApplication(Application app, ThemePreference preference)
     {
         var dark = IsDarkMode(preference);
-
         var targetThemeMode = ToWpfThemeMode(preference);
+        if (_lastAppliedPreference == preference &&
+            _lastAppliedDark == dark &&
+            app.ThemeMode == targetThemeMode &&
+            app.Resources.Contains("DgDockSurfaceBrush"))
+        {
+            return;
+        }
+
+        _lastAppliedPreference = preference;
+        _lastAppliedDark = dark;
+
         if (app.ThemeMode != targetThemeMode)
             app.ThemeMode = targetThemeMode;
 

@@ -226,8 +226,15 @@ public sealed class DesktopHostService : IDisposable
             }
 
             // Clicking empty desktop leaves 0 selected icons; clicking an icon selects it
-            var selectedCount = NativeMethods.SendMessage(hitHwnd, NativeMethods.LVM_GETSELECTEDCOUNT, 0, 0);
-            if (selectedCount == 0)
+            var sent = NativeMethods.SendMessageTimeout(
+                hitHwnd,
+                NativeMethods.LVM_GETSELECTEDCOUNT,
+                0,
+                0,
+                NativeMethods.SMTO_ABORTIFHUNG | NativeMethods.SMTO_NORMAL,
+                150,
+                out var selectedCount);
+            if (sent != 0 && selectedCount == 0)
                 EmptyDesktopDoubleClicked?.Invoke(this, EventArgs.Empty);
         }
         else if (hitHwnd == defView ||

@@ -40,6 +40,13 @@ public partial class App : Application
     private DispatcherTimer? _edgeRevealTimer;
     private string? _pendingFollowMonitorDevice;
     private long _pendingFollowSinceMs;
+    private int _lastFollowCursorX = int.MinValue;
+    private int _lastFollowCursorY = int.MinValue;
+    private int _lastEdgeCursorX = int.MinValue;
+    private int _lastEdgeCursorY = int.MinValue;
+    private int _dockRebuildGeneration;
+    private string _activeMultiMonitorMode = string.Empty;
+    private bool _activeDockEnabled;
     private bool _displaySettingsSubscribed;
 
     protected override void OnStartup(StartupEventArgs e)
@@ -91,10 +98,10 @@ public partial class App : Application
 
         _dockManager.DockChanged += (_, _) => Dispatcher.Invoke(RefreshAllDocks);
 
-        _windowTracker.WindowsChanged += (_, _) => Dispatcher.BeginInvoke(RefreshAllDocks);
+        _windowTracker.WindowsChanged += (_, _) => Dispatcher.BeginInvoke(DispatcherPriority.Background, RefreshAllDocks);
         _windowTracker.Start();
 
-        _fullscreenMonitor.FullscreenMonitorsChanged += (_, _) => Dispatcher.BeginInvoke(SyncFullscreenStateToDocks);
+        _fullscreenMonitor.FullscreenMonitorsChanged += (_, _) => Dispatcher.BeginInvoke(DispatcherPriority.Background, SyncFullscreenStateToDocks);
         _fullscreenMonitor.Start();
 
         _desktopHost.EmptyDesktopDoubleClicked += (_, _) => Dispatcher.Invoke(() =>
@@ -104,21 +111,24 @@ public partial class App : Application
         });
         _desktopHost.StartEmptyDesktopDoubleClickMonitor(Dispatcher);
 
+        // Prime cached monitor geometry once at startup (zero GDI enumeration during timer ticks)
+        DisplayMonitorService.RefreshMonitors();
+
         if (!_displaySettingsSubscribed)
         {
             SystemEvents.DisplaySettingsChanged += OnDisplaySettingsChanged;
             _displaySettingsSubscribed = true;
         }
 
-        _followMouseTimer = new DispatcherTimer
+        _followMouseTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromMilliseconds(120)
+            Interval = TimeSpan.FromMilliseconds(95)
         };
         _followMouseTimer.Tick += (_, _) => OnFollowMouseTick();
 
-        _edgeRevealTimer = new DispatcherTimer
+        _edgeRevealTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
-            Interval = TimeSpan.FromMilliseconds(40)
+            Interval = TimeSpan.FromMilliseconds(85)
         };
         _edgeRevealTimer.Tick += (_, _) => OnEdgeRevealTick();
 
@@ -127,7 +137,7 @@ public partial class App : Application
             SpawnBoxWindow(box);
 
         // Spawn Dock instance(s) according to MultiMonitorMode
-        RebuildDockWindows();
+        ScheduleRebuildDockWindows(refreshDisplayCache: false);
 
         // Spawn System Tray
         _trayController ??= new TrayIconController(
@@ -207,7 +217,7 @@ public partial class App : Application
             if (_config is null)
                 return;
 
-            RebuildDockWindows();
+            ScheduleRebuildDockWindows(refreshDisplayCache: true);
         });
     }
 
@@ -232,13 +242,18 @@ public partial class App : Application
         _followMouseTimer?.Stop();
         _edgeRevealTimer?.Stop();
         _pendingFollowMonitorDevice = null;
+        _lastFollowCursorX = int.MinValue;
+        _lastFollowCursorY = int.MinValue;
+        _lastEdgeCursorX = int.MinValue;
+        _lastEdgeCursorY = int.MinValue;
 
         foreach (var dock in _dockWindows.ToList())
         {
             try
             {
-                dock.HideDock();
-                if (!dock.IsClosed)
+                var wasClosed = dock.IsClosed;
+                dock.CleanupBeforeClose();
+                if (!wasClosed)
                     dock.Close();
             }
             catch
@@ -250,96 +265,67 @@ public partial class App : Application
         _dockWindows.Clear();
     }
 
-    private void RebuildDockWindows()
+    /// <summary>
+    /// Safely tears down existing Dock instances (detaching all timers, rendering listeners,
+    /// and window tracker handles) first, then schedules creation of fresh DockWindow instances
+    /// asynchronously via Dispatcher.BeginInvoke so ComboBox.SelectionChanged or DisplaySettingsChanged
+    /// never deadlocks inside a synchronous nested layout/redraw stack.
+    /// </summary>
+    private void ScheduleRebuildDockWindows(bool refreshDisplayCache)
     {
-        if (!_config.ShowDock || !_config.Dock.Enabled)
-        {
-            CloseAndClearAllDockWindows();
-            return;
-        }
-
-        var allMonitors = DisplayMonitorService.GetAllMonitors();
-        int? cursorX = null;
-        int? cursorY = null;
-        if (DesktopHostService.TryGetCursorScreenPosition(out var cx, out var cy))
-        {
-            cursorX = cx;
-            cursorY = cy;
-        }
-
+        var generation = ++_dockRebuildGeneration;
+        var dockEnabled = _config.ShowDock && _config.Dock.Enabled;
         var mode = DockMultiMonitorModes.Normalize(_config.Dock.MultiMonitorMode);
-        var targetMonitors = DockPositionCalculator.SelectTargetMonitors(allMonitors, mode, cursorX, cursorY);
+        _activeDockEnabled = dockEnabled;
+        _activeMultiMonitorMode = mode;
 
-        var nextDocks = new List<DockWindow>(targetMonitors.Count);
-        var reusable = _dockWindows.Where(d => !d.IsClosed).ToList();
+        // Always cleanly tear down and unsubscribe all existing Dock windows before creating replacements
+        CloseAndClearAllDockWindows();
 
-        if (mode == DockMultiMonitorModes.AllMonitors)
+        if (!dockEnabled)
+            return;
+
+        Dispatcher.BeginInvoke(DispatcherPriority.Loaded, () =>
         {
+            if (generation != _dockRebuildGeneration)
+                return;
+
+            if (!_config.ShowDock || !_config.Dock.Enabled)
+                return;
+
+            if (refreshDisplayCache)
+                DisplayMonitorService.RefreshMonitors();
+
+            var allMonitors = DisplayMonitorService.GetCachedMonitors();
+            int? cursorX = null;
+            int? cursorY = null;
+            if (DesktopHostService.TryGetCursorScreenPosition(out var cx, out var cy))
+            {
+                cursorX = cx;
+                cursorY = cy;
+            }
+
+            var currentMode = DockMultiMonitorModes.Normalize(_config.Dock.MultiMonitorMode);
+            var targetMonitors = DockPositionCalculator.SelectTargetMonitors(allMonitors, currentMode, cursorX, cursorY);
+
             foreach (var monitor in targetMonitors)
             {
-                var match = reusable.FirstOrDefault(d =>
-                    string.Equals(d.TargetMonitor.DeviceName, monitor.DeviceName, StringComparison.OrdinalIgnoreCase) ||
-                    (monitor.Handle != 0 && d.TargetMonitor.Handle == monitor.Handle));
+                var dock = CreateDockWindow(monitor);
+                _dockWindows.Add(dock);
 
-                if (match is not null)
+                var isFs = _fullscreenMonitor.IsMonitorFullscreen(monitor.Handle);
+                if (isFs && _config.Dock.AutoHideOnFullscreen)
                 {
-                    reusable.Remove(match);
-                    match.SetTargetMonitor(monitor, smoothTransition: false);
-                    nextDocks.Add(match);
+                    dock.SetFullscreenHidden(true);
                 }
                 else
                 {
-                    nextDocks.Add(CreateDockWindow(monitor));
+                    dock.Show();
                 }
             }
-        }
-        else if (targetMonitors.Count > 0)
-        {
-            var target = targetMonitors[0];
-            if (reusable.Count > 0)
-            {
-                var primaryDock = reusable[0];
-                reusable.RemoveAt(0);
-                primaryDock.SetTargetMonitor(target, smoothTransition: false);
-                nextDocks.Add(primaryDock);
-            }
-            else
-            {
-                nextDocks.Add(CreateDockWindow(target));
-            }
-        }
 
-        // Safely close any excess / unplugged-monitor DockWindow instances to prevent leaks
-        foreach (var stale in reusable)
-        {
-            try
-            {
-                stale.HideDock();
-                if (!stale.IsClosed)
-                    stale.Close();
-            }
-            catch
-            {
-                // Ignore teardown errors
-            }
-        }
-
-        _dockWindows.Clear();
-        _dockWindows.AddRange(nextDocks);
-
-        foreach (var dock in _dockWindows)
-        {
-            var isFs = _fullscreenMonitor.IsMonitorFullscreen(dock.TargetMonitor.Handle);
-            dock.SetFullscreenHidden(isFs);
-            if (!dock.IsVisible && !(isFs && _config.Dock.AutoHideOnFullscreen))
-                dock.Show();
-
-            dock.ApplySettings();
-            dock.RefreshDock();
-            dock.RepositionDock();
-        }
-
-        UpdateDockMonitorTimers();
+            UpdateDockMonitorTimers();
+        });
     }
 
     private void UpdateDockMonitorTimers()
@@ -416,7 +402,15 @@ public partial class App : Application
         if (!DesktopHostService.TryGetCursorScreenPosition(out var cursorX, out var cursorY))
             return;
 
-        var monitors = DisplayMonitorService.GetAllMonitors();
+        // Skip all coordinate checks when cursor has not moved and no switch dwell is pending
+        if (cursorX == _lastFollowCursorX && cursorY == _lastFollowCursorY && _pendingFollowMonitorDevice is null)
+            return;
+
+        _lastFollowCursorX = cursorX;
+        _lastFollowCursorY = cursorY;
+
+        // Pure in-memory Rect coordinate lookup (ZERO GDI / Screen.AllScreens enumeration)
+        var monitors = DisplayMonitorService.GetCachedMonitors();
         var cursorMonitor = DockPositionCalculator.FindMonitorForPoint(monitors, cursorX, cursorY);
         if (cursorMonitor is null)
             return;
@@ -461,6 +455,10 @@ public partial class App : Application
         if (!DesktopHostService.TryGetCursorScreenPosition(out var cursorX, out var cursorY))
             return;
 
+        var cursorMoved = cursorX != _lastEdgeCursorX || cursorY != _lastEdgeCursorY;
+        _lastEdgeCursorX = cursorX;
+        _lastEdgeCursorY = cursorY;
+
         var nowMs = Environment.TickCount64;
         var anyNeedsPolling = false;
 
@@ -471,9 +469,11 @@ public partial class App : Application
 
             if (dock.IsFullscreenHidden || dock.IsTemporarilyRevealed)
             {
+                anyNeedsPolling = true;
+                if (!cursorMoved && !dock.HasActiveEdgeRevealCountdown)
+                    continue;
+
                 dock.UpdateEdgeRevealTick(cursorX, cursorY, nowMs);
-                if (dock.IsFullscreenHidden || dock.IsTemporarilyRevealed)
-                    anyNeedsPolling = true;
             }
         }
 
@@ -539,11 +539,15 @@ public partial class App : Application
 
         if (_config.ShowDock)
         {
+            DisplayMonitorService.RefreshMonitors();
             RepositionAllDocks();
             Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
             {
                 if (_config.ShowDock)
+                {
+                    DisplayMonitorService.RefreshMonitors();
                     RepositionAllDocks();
+                }
             });
         }
 
@@ -756,7 +760,32 @@ public partial class App : Application
         foreach (var win in _boxWindows.Values)
             win.ApplyVisualSettings();
 
-        RebuildDockWindows();
+        var desiredEnabled = _config.ShowDock && _config.Dock.Enabled;
+        var desiredMode = DockMultiMonitorModes.Normalize(_config.Dock.MultiMonitorMode);
+        var needsDockRebuild =
+            desiredEnabled != _activeDockEnabled ||
+            !string.Equals(desiredMode, _activeMultiMonitorMode, StringComparison.OrdinalIgnoreCase) ||
+            (desiredEnabled && _dockWindows.Count == 0);
+
+        if (needsDockRebuild)
+        {
+            ScheduleRebuildDockWindows(refreshDisplayCache: true);
+        }
+        else if (desiredEnabled)
+        {
+            foreach (var dock in _dockWindows)
+            {
+                if (!dock.IsClosed)
+                {
+                    var isFs = _fullscreenMonitor.IsMonitorFullscreen(dock.TargetMonitor.Handle);
+                    dock.SetFullscreenHidden(isFs);
+                    dock.ApplySettings();
+                    dock.ScheduleReposition();
+                }
+            }
+            UpdateDockMonitorTimers();
+        }
+
         ApplySystemSettings();
     }
 
@@ -773,14 +802,19 @@ public partial class App : Application
             // Ignore registry failure
         }
 
-        _taskbarService.SetTaskbarHidden(_config.ShowDock && _config.Dock.AutoHideSystemTaskbar);
-        if (_config.ShowDock)
+        var wantTaskbarHidden = _config.ShowDock && _config.Dock.AutoHideSystemTaskbar;
+        var taskbarChanged = wantTaskbarHidden != _taskbarService.IsHiddenByApp;
+        _taskbarService.SetTaskbarHidden(wantTaskbarHidden);
+
+        if (taskbarChanged && _config.ShowDock)
         {
-            RepositionAllDocks();
-            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
+            Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
             {
                 if (_config.ShowDock)
+                {
+                    DisplayMonitorService.RefreshMonitors();
                     RepositionAllDocks();
+                }
             });
         }
     }
@@ -813,7 +847,7 @@ public partial class App : Application
         foreach (var box in _config.Boxes)
             SpawnBoxWindow(box);
 
-        RebuildDockWindows();
+        ScheduleRebuildDockWindows(refreshDisplayCache: true);
         ApplySystemSettings();
     }
 

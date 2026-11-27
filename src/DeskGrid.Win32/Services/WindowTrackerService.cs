@@ -14,10 +14,13 @@ public sealed class WindowTrackerService : IWindowTracker
     private readonly uint _ownProcessId = (uint)Environment.ProcessId;
     private readonly List<nint> _hooks = [];
     private readonly ConcurrentDictionary<uint, string> _processPathCache = new();
+    private readonly ConcurrentDictionary<nint, byte> _excludedHandles = new();
     private readonly object _lock = new();
     private NativeMethods.WinEventDelegate? _winEventDelegate;
     private Timer? _debounceTimer;
     private IReadOnlyList<RunningWindowInfo> _snapshot = [];
+    private int _isRefreshing;
+    private int _pendingRefreshRequested;
     private bool _disposed;
 
     public event EventHandler? WindowsChanged;
@@ -26,6 +29,18 @@ public sealed class WindowTrackerService : IWindowTracker
     {
         lock (_lock)
             return _snapshot;
+    }
+
+    public void RegisterExcludedWindow(nint hwnd)
+    {
+        if (hwnd != 0)
+            _excludedHandles[hwnd] = 1;
+    }
+
+    public void UnregisterExcludedWindow(nint hwnd)
+    {
+        if (hwnd != 0)
+            _excludedHandles.TryRemove(hwnd, out _);
     }
 
     public void Start()
@@ -40,7 +55,8 @@ public sealed class WindowTrackerService : IWindowTracker
         RegisterHook(NativeMethods.EVENT_OBJECT_CREATE, NativeMethods.EVENT_OBJECT_HIDE);
         RegisterHook(NativeMethods.EVENT_OBJECT_NAMECHANGE, NativeMethods.EVENT_OBJECT_NAMECHANGE);
 
-        RefreshAndNotify();
+        // Kick off initial enumeration on a background thread instead of blocking UI startup
+        _debounceTimer.Change(0, Timeout.Infinite);
     }
 
     public void Stop()
@@ -113,92 +129,185 @@ public sealed class WindowTrackerService : IWindowTracker
         if (_disposed || hwnd == 0 || idObject != 0)
             return;
 
+        // Immediately discard any event targeting our own process or explicitly registered Dock/Box windows
+        if (_excludedHandles.ContainsKey(hwnd))
+            return;
+
+        NativeMethods.GetWindowThreadProcessId(hwnd, out var pid);
+        if (pid == 0 || pid == _ownProcessId)
+            return;
+
         ScheduleRefresh();
     }
 
     private void ScheduleRefresh()
     {
         if (_disposed) return;
-        _debounceTimer?.Change(80, Timeout.Infinite);
+        try
+        {
+            _debounceTimer?.Change(90, Timeout.Infinite);
+        }
+        catch (ObjectDisposedException)
+        {
+            // Ignore races during shutdown
+        }
     }
 
     private void RefreshAndNotify()
     {
         if (_disposed) return;
 
-        var foreground = NativeMethods.GetForegroundWindow();
-        var windows = new List<RunningWindowInfo>();
-        var activePids = new HashSet<uint>();
-
-        NativeMethods.EnumWindows((hwnd, _) =>
+        if (Interlocked.Exchange(ref _isRefreshing, 1) != 0)
         {
-            if (!IsTrackableAppWindow(hwnd, out var pid, out var title))
-                return true;
+            Interlocked.Exchange(ref _pendingRefreshRequested, 1);
+            return;
+        }
 
-            activePids.Add(pid);
-            var exePath = ResolveProcessExecutablePath(pid);
-            var procName = !string.IsNullOrEmpty(exePath)
-                ? Path.GetFileNameWithoutExtension(exePath)
-                : title;
-
-            var appKey = DockManager.NormalizeAppKey(
-                string.IsNullOrEmpty(exePath) ? title : exePath);
-
-            // Separate UWP apps hosted inside ApplicationFrameHost by their window title
-            if (appKey.Equals("applicationframehost", StringComparison.OrdinalIgnoreCase))
+        try
+        {
+            do
             {
-                appKey = "uwp:" + title.ToLowerInvariant();
-                procName = title;
+                Interlocked.Exchange(ref _pendingRefreshRequested, 0);
+                if (_disposed)
+                    return;
+
+                var foreground = NativeMethods.GetForegroundWindow();
+                var windows = new List<RunningWindowInfo>();
+                var activePids = new HashSet<uint>();
+                var excludedSnapshot = _excludedHandles.IsEmpty
+                    ? null
+                    : new HashSet<nint>(_excludedHandles.Keys);
+
+                NativeMethods.EnumWindows((hwnd, _) =>
+                {
+                    if (!IsTrackableAppWindow(hwnd, excludedSnapshot, out var pid, out var title))
+                        return true;
+
+                    activePids.Add(pid);
+                    var exePath = ResolveProcessExecutablePath(pid);
+                    var procName = !string.IsNullOrEmpty(exePath)
+                        ? Path.GetFileNameWithoutExtension(exePath)
+                        : title;
+
+                    var appKey = DockManager.NormalizeAppKey(
+                        string.IsNullOrEmpty(exePath) ? title : exePath);
+
+                    // Separate UWP apps hosted inside ApplicationFrameHost by their window title
+                    if (appKey.Equals("applicationframehost", StringComparison.OrdinalIgnoreCase))
+                    {
+                        appKey = "uwp:" + title.ToLowerInvariant();
+                        procName = title;
+                    }
+
+                    windows.Add(new RunningWindowInfo
+                    {
+                        Handle = hwnd,
+                        ProcessId = (int)pid,
+                        Title = title,
+                        ProcessName = procName,
+                        ExecutablePath = exePath,
+                        AppKey = appKey,
+                        IsMinimized = NativeMethods.IsIconic(hwnd),
+                        IsActive = hwnd == foreground
+                    });
+
+                    return true;
+                }, 0);
+
+                // Trim dead PIDs from cache
+                if (_processPathCache.Count > 128)
+                {
+                    foreach (var key in _processPathCache.Keys)
+                    {
+                        if (!activePids.Contains(key))
+                            _processPathCache.TryRemove(key, out _);
+                    }
+                }
+
+                bool changed;
+                lock (_lock)
+                {
+                    changed = !SnapshotsEqual(_snapshot, windows);
+                    if (changed)
+                        _snapshot = windows;
+                }
+
+                if (changed && !_disposed)
+                    WindowsChanged?.Invoke(this, EventArgs.Empty);
             }
-
-            windows.Add(new RunningWindowInfo
-            {
-                Handle = hwnd,
-                ProcessId = (int)pid,
-                Title = title,
-                ProcessName = procName,
-                ExecutablePath = exePath,
-                AppKey = appKey,
-                IsMinimized = NativeMethods.IsIconic(hwnd),
-                IsActive = hwnd == foreground
-            });
-
-            return true;
-        }, 0);
-
-        // Trim dead PIDs from cache
-        if (_processPathCache.Count > 128)
+            while (!_disposed && Interlocked.Exchange(ref _pendingRefreshRequested, 0) != 0);
+        }
+        finally
         {
-            foreach (var key in _processPathCache.Keys)
+            Interlocked.Exchange(ref _isRefreshing, 0);
+        }
+    }
+
+    private static bool SnapshotsEqual(IReadOnlyList<RunningWindowInfo> prev, IReadOnlyList<RunningWindowInfo> next)
+    {
+        if (prev.Count != next.Count)
+            return false;
+
+        for (var i = 0; i < prev.Count; i++)
+        {
+            var a = prev[i];
+            var b = next[i];
+            if (a.Handle != b.Handle ||
+                a.ProcessId != b.ProcessId ||
+                a.IsActive != b.IsActive ||
+                a.IsMinimized != b.IsMinimized ||
+                !string.Equals(a.AppKey, b.AppKey, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(a.Title, b.Title, StringComparison.Ordinal))
             {
-                if (!activePids.Contains(key))
-                    _processPathCache.TryRemove(key, out _);
+                return false;
             }
         }
 
-        lock (_lock)
-            _snapshot = windows;
-
-        WindowsChanged?.Invoke(this, EventArgs.Empty);
+        return true;
     }
 
-    private bool IsTrackableAppWindow(nint hwnd, out uint pid, out string title)
+    private bool IsTrackableAppWindow(
+        nint hwnd,
+        IReadOnlySet<nint>? excludedHandles,
+        out uint pid,
+        out string title)
     {
         pid = 0;
         title = string.Empty;
+
+        if (hwnd == 0 || (excludedHandles is not null && excludedHandles.Contains(hwnd)))
+            return false;
 
         if (!NativeMethods.IsWindowVisible(hwnd))
             return false;
 
         NativeMethods.GetWindowThreadProcessId(hwnd, out pid);
-        if (pid == 0 || pid == _ownProcessId)
+        var root = NativeMethods.GetAncestor(hwnd, NativeMethods.GA_ROOT);
+        uint rootPid = 0;
+        if (root != 0 && root != hwnd)
+        {
+            if (excludedHandles is not null && excludedHandles.Contains(root))
+                return false;
+            NativeMethods.GetWindowThreadProcessId(root, out rootPid);
+        }
+
+        var owner = NativeMethods.GetWindow(hwnd, NativeMethods.GW_OWNER);
+        uint ownerPid = 0;
+        if (owner != 0)
+        {
+            if (excludedHandles is not null && excludedHandles.Contains(owner))
+                return false;
+            NativeMethods.GetWindowThreadProcessId(owner, out ownerPid);
+        }
+
+        // Strict exclusion: 100% filters out current process (primary DockWindow, all secondary DockWindows, boxes, popups)
+        if (WindowExclusionFilter.ShouldExcludeWindow(hwnd, pid, _ownProcessId, excludedHandles, rootPid, ownerPid))
             return false;
 
         var exStyle = NativeMethods.GetWindowLongPtr(hwnd, NativeMethods.GWL_EXSTYLE);
         if ((exStyle & NativeMethods.WS_EX_TOOLWINDOW) != 0)
             return false;
 
-        var owner = NativeMethods.GetWindow(hwnd, NativeMethods.GW_OWNER);
         if (owner != 0 && (exStyle & NativeMethods.WS_EX_APPWINDOW) == 0)
             return false;
 
@@ -214,6 +323,7 @@ public sealed class WindowTrackerService : IWindowTracker
         if (cls.Equals("Progman", StringComparison.OrdinalIgnoreCase) ||
             cls.Equals("WorkerW", StringComparison.OrdinalIgnoreCase) ||
             cls.Equals("Shell_TrayWnd", StringComparison.OrdinalIgnoreCase) ||
+            cls.Equals("Shell_SecondaryTrayWnd", StringComparison.OrdinalIgnoreCase) ||
             cls.Equals("Windows.UI.Core.CoreWindow", StringComparison.OrdinalIgnoreCase))
         {
             return false;

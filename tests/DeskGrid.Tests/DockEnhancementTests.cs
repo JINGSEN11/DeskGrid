@@ -76,6 +76,139 @@ public sealed class DockEnhancementTests
     }
 
     [TestFact]
+    public void MultiMonitorPositioning_ReentrancyGuardAndThresholdPreventCrossDpiAndNegativeCoordLoops()
+    {
+        // Secondary monitor with negative X and negative Y coordinates and 125% DPI (above-left of primary)
+        var topLeftSecondary = new DisplayMonitorInfo(
+            DeviceName: @"\\.\DISPLAY3",
+            Handle: 3003,
+            IsPrimary: false,
+            BoundsPx: new PhysicalRect(-2560, -1440, 0, 0),
+            WorkingAreaPx: new PhysicalRect(-2560, -1440, 0, -50),
+            DpiScaleX: 1.25,
+            DpiScaleY: 1.25);
+
+        // Secondary monitor to the right of primary with 200% HiDPI scaling
+        var rightHiDpiSecondary = new DisplayMonitorInfo(
+            DeviceName: @"\\.\DISPLAY4",
+            Handle: 4004,
+            IsPrimary: false,
+            BoundsPx: new PhysicalRect(3840, 0, 7680, 2160),
+            WorkingAreaPx: new PhysicalRect(3840, 0, 7680, 2064),
+            DpiScaleX: 2.0,
+            DpiScaleY: 2.0);
+
+        // Verify negative X & Y secondary placement stays strictly within its own working area (never pulled toward primary 0,0)
+        var topLeftPlacement = DockPositionCalculator.CalculateBottomPlacement(
+            topLeftSecondary,
+            windowDipWidth: 500,
+            windowDipHeight: 100,
+            autoHideSystemTaskbar: false);
+        AssertEx.Equal(625, topLeftPlacement.PhysicalWidth);
+        AssertEx.Equal(125, topLeftPlacement.PhysicalHeight);
+        AssertEx.Equal(-1592, topLeftPlacement.PhysicalLeft); // -2560 + round((2560 - 625) / 2) = -1592
+        AssertEx.Equal(-175, topLeftPlacement.PhysicalTop);   // -50 - 125
+        AssertEx.True(topLeftPlacement.PhysicalLeft >= topLeftSecondary.WorkingAreaPx.Left);
+        AssertEx.True(topLeftPlacement.PhysicalLeft + topLeftPlacement.PhysicalWidth <= topLeftSecondary.WorkingAreaPx.Right);
+        AssertEx.True(topLeftPlacement.PhysicalTop >= topLeftSecondary.WorkingAreaPx.Top);
+        AssertEx.True(topLeftPlacement.PhysicalTop + topLeftPlacement.PhysicalHeight <= topLeftSecondary.WorkingAreaPx.Bottom);
+
+        // Verify 200% HiDPI secondary monitor placement
+        var hiDpiPlacement = DockPositionCalculator.CalculateBottomPlacement(
+            rightHiDpiSecondary,
+            windowDipWidth: 500,
+            windowDipHeight: 100,
+            autoHideSystemTaskbar: false);
+        AssertEx.Equal(1000, hiDpiPlacement.PhysicalWidth);
+        AssertEx.Equal(200, hiDpiPlacement.PhysicalHeight);
+        AssertEx.Equal(5260, hiDpiPlacement.PhysicalLeft); // 3840 + (3840 - 1000) / 2
+        AssertEx.Equal(1864, hiDpiPlacement.PhysicalTop);  // 2064 - 200
+        AssertEx.Near(2630.0, hiDpiPlacement.DipLeft, 0.01);
+        AssertEx.Near(932.0, hiDpiPlacement.DipTop, 0.01);
+
+        // 1. Re-entrancy lock blocks recursive positioning triggered by SizeChanged / LocationChanged / OnDpiChanged
+        var guard = new DockPositionGuard();
+        var outerExecutions = 0;
+        var nestedExecutions = 0;
+
+        var outerRan = guard.TryExecute(() =>
+        {
+            outerExecutions++;
+            AssertEx.True(guard.IsUpdatingPosition);
+
+            // Simulate nested re-entrant callbacks firing during SetWindowPos / Left / Top mutation
+            var nested1 = guard.TryExecute(() => nestedExecutions++);
+            var nested2 = guard.TryExecute(() => nestedExecutions++);
+            AssertEx.False(nested1);
+            AssertEx.False(nested2);
+        });
+
+        AssertEx.True(outerRan);
+        AssertEx.Equal(1, outerExecutions);
+        AssertEx.Equal(0, nestedExecutions);
+        AssertEx.False(guard.IsUpdatingPosition);
+
+        // Lock must always release cleanly even if an exception is thrown
+        var threw = false;
+        try
+        {
+            guard.TryExecute(() => throw new InvalidOperationException("Simulated Win32 error"));
+        }
+        catch (InvalidOperationException)
+        {
+            threw = true;
+        }
+        AssertEx.True(threw);
+        AssertEx.False(guard.IsUpdatingPosition);
+
+        // 2. Minimum change threshold (< 0.5 DIP and <= 1px physical) prevents rounding ping-pong loops
+        AssertEx.False(DockPositionGuard.ShouldUpdateDipPosition(100.0, 200.0, 100.0, 200.0));
+        AssertEx.False(DockPositionGuard.ShouldUpdateDipPosition(100.0, 200.0, 100.49, 199.51));
+        AssertEx.True(DockPositionGuard.ShouldUpdateDipPosition(100.0, 200.0, 100.5, 200.0));
+        AssertEx.True(DockPositionGuard.ShouldUpdateDipPosition(100.0, 200.0, 100.0, 200.5));
+        AssertEx.True(DockPositionGuard.ShouldUpdateDipPosition(double.NaN, double.NaN, -1273.6, -140.0));
+        AssertEx.False(DockPositionGuard.ShouldUpdateDipPosition(100.0, 200.0, double.NaN, 200.0));
+
+        var currentSecondaryRect = new PhysicalRect(
+            topLeftPlacement.PhysicalLeft,
+            topLeftPlacement.PhysicalTop,
+            topLeftPlacement.PhysicalLeft + topLeftPlacement.PhysicalWidth,
+            topLeftPlacement.PhysicalTop + topLeftPlacement.PhysicalHeight);
+
+        AssertEx.False(DockPositionGuard.ShouldUpdatePhysicalPosition(currentSecondaryRect, topLeftPlacement.PhysicalLeft, topLeftPlacement.PhysicalTop));
+        AssertEx.False(DockPositionGuard.ShouldUpdatePhysicalPosition(currentSecondaryRect, topLeftPlacement.PhysicalLeft + 1, topLeftPlacement.PhysicalTop - 1));
+        AssertEx.True(DockPositionGuard.ShouldUpdatePhysicalPosition(currentSecondaryRect, topLeftPlacement.PhysicalLeft + 2, topLeftPlacement.PhysicalTop));
+        AssertEx.True(DockPositionGuard.ShouldUpdatePhysicalPosition(null, topLeftPlacement.PhysicalLeft, topLeftPlacement.PhysicalTop));
+    }
+
+    [TestFact]
+    public void WindowExclusionFilter_ExcludesAllOwnProcessPrimaryAndSecondaryDocks()
+    {
+        const uint ownPid = 4242;
+        const uint chromePid = 9999;
+        var excludedHandles = new HashSet<nint> { 1001, 1002, 1003 };
+
+        // Zero handle or zero PID always excluded
+        AssertEx.True(WindowExclusionFilter.ShouldExcludeWindow(0, chromePid, ownPid, excludedHandles));
+        AssertEx.True(WindowExclusionFilter.ShouldExcludeWindow(5001, 0, ownPid, excludedHandles));
+
+        // Main Dock and all secondary Dock handles owned by current process are 100% excluded
+        AssertEx.True(WindowExclusionFilter.ShouldExcludeWindow(1001, ownPid, ownPid, excludedHandles));
+        AssertEx.True(WindowExclusionFilter.ShouldExcludeWindow(1002, ownPid, ownPid, excludedHandles));
+        AssertEx.True(WindowExclusionFilter.ShouldExcludeWindow(2001, ownPid, ownPid, null));
+
+        // Explicitly registered Dock HWND is excluded even if PID lookup returned another value
+        AssertEx.True(WindowExclusionFilter.ShouldExcludeWindow(1003, chromePid, ownPid, excludedHandles));
+
+        // Child/owned windows whose root ancestor or owner belongs to DeskGrid process are excluded
+        AssertEx.True(WindowExclusionFilter.ShouldExcludeWindow(6001, chromePid, ownPid, excludedHandles, rootAncestorProcessId: ownPid));
+        AssertEx.True(WindowExclusionFilter.ShouldExcludeWindow(6002, chromePid, ownPid, excludedHandles, ownerProcessId: ownPid));
+
+        // Normal external app windows are tracked
+        AssertEx.False(WindowExclusionFilter.ShouldExcludeWindow(7001, chromePid, ownPid, excludedHandles));
+    }
+
+    [TestFact]
     public void DockLayoutMetrics_ClampsScaleAndReservesUnclippedTopHeadroom()
     {
         AssertEx.Near(0.70, DockLayoutMetrics.ClampScale(0.10));
@@ -146,12 +279,15 @@ public sealed class DockEnhancementTests
         AssertEx.Equal(DockEdgeRevealVisualState.Normal, sB.State);
 
         // Brief brush of bottom edge (< 135ms) must NOT trigger reveal
+        AssertEx.False(smA.HasPendingTransition);
         smA.Update(100, true, true, isCursorAtBottomEdge: true, isCursorInsideDock: false, hasOpenInteractiveOverlay: false);
+        AssertEx.True(smA.HasPendingTransition);
         sA = smA.Update(200, true, true, isCursorAtBottomEdge: true, isCursorInsideDock: false, hasOpenInteractiveOverlay: false);
         AssertEx.Equal(DockEdgeRevealVisualState.FullscreenHidden, sA.State);
 
         // Leave edge -> dwell timer resets
         smA.Update(220, true, true, isCursorAtBottomEdge: false, isCursorInsideDock: false, hasOpenInteractiveOverlay: false);
+        AssertEx.False(smA.HasPendingTransition);
 
         // Re-enter edge and dwell >= 135ms -> reveals
         smA.Update(300, true, true, isCursorAtBottomEdge: true, isCursorInsideDock: false, hasOpenInteractiveOverlay: false);
